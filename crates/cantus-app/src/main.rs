@@ -1,34 +1,34 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use eframe::egui;
+mod app;
+mod table;
+
+use std::path::PathBuf;
+
+use cantus_core::Library;
 
 fn main() -> eframe::Result {
+    let (db_path, library) = match open_library() {
+        Ok(opened) => opened,
+        Err(err) => {
+            rfd::MessageDialog::new()
+                .set_level(rfd::MessageLevel::Error)
+                .set_title("Cantus")
+                .set_description(format!("Cannot open the library: {err}"))
+                .show();
+            std::process::exit(1);
+        }
+    };
     eframe::run_native(
         concat!("Cantus ", env!("CARGO_PKG_VERSION")),
         eframe::NativeOptions::default(),
-        Box::new(|_| Ok(Box::new(App))),
+        Box::new(|_| Ok(Box::new(app::App::new(db_path, library)))),
     )
 }
 
-struct App;
-
-impl eframe::App for App {
-    fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ui, library_view);
-    }
-}
-
-fn library_view(ui: &mut egui::Ui) {
-    ui.centered_and_justified(|ui| ui.label("Library empty"));
-}
-
-#[cfg(test)]
-mod tests {
-    use egui_kittest::{Harness, kittest::Queryable};
-
-    #[test]
-    fn empty_library_shows_placeholder() {
-        let harness = Harness::new_ui(super::library_view);
-        harness.get_by_label("Library empty");
-    }
+fn open_library() -> Result<(PathBuf, Library), String> {
+    let dirs = directories::ProjectDirs::from("", "", "Cantus").ok_or("no home directory found")?;
+    let path = dirs.data_local_dir().join("library.db");
+    let library = Library::open(&path).map_err(|e| e.to_string())?;
+    Ok((path, library))
 }

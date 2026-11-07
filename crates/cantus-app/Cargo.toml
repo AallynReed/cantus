@@ -12,10 +12,15 @@ name = "cantus"
 path = "src/main.rs"
 
 [dependencies]
+cantus-core = { path = "../cantus-core" }
+directories = "6.0.0"
 eframe = "0.37.0"
+egui_extras = "0.37.0"
+rfd = "0.17.2"
 
 [dev-dependencies]
-egui_kittest = "0.37.0"
+egui_kittest = { version = "0.37.0", features = ["eframe"] }
+tempfile = "3.27.0"
 
 [lints]
 workspace = true

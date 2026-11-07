@@ -1,0 +1,21 @@
+[package]
+name = "cantus-app"
+description = "Desktop music library manager"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "cantus"
+path = "src/main.rs"
+
+[dependencies]
+eframe = "0.37.0"
+
+[dev-dependencies]
+egui_kittest = "0.37.0"
+
+[lints]
+workspace = true

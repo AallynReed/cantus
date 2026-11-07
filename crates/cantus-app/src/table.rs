@@ -1,5 +1,7 @@
+use std::collections::BTreeSet;
+
 use cantus_core::{Track, TrackState};
-use eframe::egui::{self, RichText, Ui};
+use eframe::egui::{self, Modifiers, RichText, Ui};
 use egui_extras::{Column, TableBuilder};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,17 +73,54 @@ fn length(ms: Option<u32>) -> String {
         .unwrap_or_default()
 }
 
-/// Shows the track table and returns the column whose header was clicked.
-pub fn show(ui: &mut Ui, tracks: &[Track], sort: Sort) -> Option<SortKey> {
+/// Selected track ids, with list-style click, Ctrl-click and Shift-click handling.
+#[derive(Debug, Default)]
+pub struct Selection {
+    pub ids: BTreeSet<i64>,
+    /// Row index Shift-click extends from. Cleared when the row order changes.
+    pub anchor: Option<usize>,
+}
+
+impl Selection {
+    pub fn click(&mut self, tracks: &[Track], index: usize, modifiers: Modifiers) {
+        if !modifiers.command {
+            self.ids.clear();
+        }
+        match self.anchor.filter(|_| modifiers.shift) {
+            Some(anchor) => {
+                let range = anchor.min(index)..=anchor.max(index);
+                self.ids.extend(tracks[range].iter().map(|t| t.id));
+            }
+            None => {
+                let id = tracks[index].id;
+                if !self.ids.remove(&id) || !modifiers.command {
+                    self.ids.insert(id);
+                }
+                self.anchor = Some(index);
+            }
+        }
+    }
+}
+
+/// Shows the track table, updates the selection and returns the header clicked, if any.
+pub fn show(
+    ui: &mut Ui,
+    tracks: &[Track],
+    sort: Sort,
+    selection: &mut Selection,
+) -> Option<SortKey> {
     if tracks.is_empty() {
         ui.centered_and_justified(|ui| ui.label("Library empty"));
         return None;
     }
 
+    let modifiers = ui.input(|i| i.modifiers);
     let mut clicked = None;
+    let mut clicked_row = None;
     TableBuilder::new(ui)
         .striped(true)
         .resizable(true)
+        .sense(egui::Sense::click())
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
         .columns(Column::remainder().at_least(80.0).clip(true), 3)
         .columns(Column::auto().at_least(50.0), 2)
@@ -101,6 +140,7 @@ pub fn show(ui: &mut Ui, tracks: &[Track], sort: Sort) -> Option<SortKey> {
             body.rows(20.0, tracks.len(), |mut row| {
                 let t = &tracks[row.index()];
                 let m = &t.meta;
+                row.set_selected(selection.ids.contains(&t.id));
                 let hover = match t.state {
                     TrackState::Ok => t.path.display().to_string(),
                     TrackState::Missing => format!("Missing: {}", t.path.display()),
@@ -127,14 +167,20 @@ pub fn show(ui: &mut Ui, tracks: &[Track], sort: Sort) -> Option<SortKey> {
                         } else {
                             text.weak()
                         };
-                        let label = ui.label(text);
+                        let label = ui.add(egui::Label::new(text).selectable(false));
                         if i == 0 {
                             label.on_hover_text(&hover);
                         }
                     });
                 }
+                if row.response().clicked() {
+                    clicked_row = Some(row.index());
+                }
             });
         });
+    if let Some(index) = clicked_row {
+        selection.click(tracks, index, modifiers);
+    }
     clicked
 }
 
@@ -207,6 +253,26 @@ mod tests {
     }
 
     #[test]
+    fn click_ctrl_click_and_shift_click_select_like_a_file_list() {
+        let tracks: Vec<_> = (0..5).map(|i| track(i, "t", "a", 1)).collect();
+        let ctrl = Modifiers::COMMAND;
+        let shift = Modifiers::SHIFT;
+        let mut sel = Selection::default();
+        let ids = |s: &Selection| s.ids.iter().copied().collect::<Vec<_>>();
+
+        sel.click(&tracks, 1, Modifiers::NONE);
+        assert_eq!(ids(&sel), [1]);
+        sel.click(&tracks, 3, shift);
+        assert_eq!(ids(&sel), [1, 2, 3]);
+        sel.click(&tracks, 2, ctrl);
+        assert_eq!(ids(&sel), [1, 3]);
+        sel.click(&tracks, 4, ctrl);
+        assert_eq!(ids(&sel), [1, 3, 4]);
+        sel.click(&tracks, 0, Modifiers::NONE);
+        assert_eq!(ids(&sel), [0]);
+    }
+
+    #[test]
     fn title_falls_back_to_file_name() {
         let mut t = track(1, "song", "", 1);
         t.meta.title = None;
@@ -221,13 +287,13 @@ mod tests {
         };
         let tracks = [track(1, "First Song", "Album", 1)];
         let harness = Harness::new_ui(|ui| {
-            show(ui, &tracks, sort);
+            show(ui, &tracks, sort, &mut Selection::default());
         });
         harness.get_by_label("First Song");
         harness.get_by_label("1:23");
 
         let harness = Harness::new_ui(|ui| {
-            show(ui, &[], sort);
+            show(ui, &[], sort, &mut Selection::default());
         });
         harness.get_by_label("Library empty");
     }

@@ -1,10 +1,10 @@
 use std::collections::HashMap;
-use std::fs::{File, Metadata as FsMetadata};
+use std::fs::{self, File, Metadata as FsMetadata};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use rusqlite::{Transaction, params};
+use rusqlite::{Connection, Transaction, params};
 use walkdir::WalkDir;
 
 use crate::{Error, Library, Result, TrackState, tags};
@@ -158,9 +158,13 @@ fn known_tracks(tx: &Transaction, root_id: i64) -> Result<HashMap<String, Known>
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
-/// Reads tags and inserts (`id` = None) or replaces a track row. Returns the stored state.
+const TRACK_FIELDS: &str = "root_id, path, size, mtime, quick_key, state, error, duration_ms,      bitrate, sample_rate, channels, title, artist, album_artist, album, track_no, disc_no, year, genre";
+const TRACK_VALUES: &str =
+    "?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19";
+
+/// Reads tags and inserts (`id` = None) or updates a track row. Returns the stored state.
 fn write_track(
-    tx: &Transaction,
+    conn: &Connection,
     id: Option<i64>,
     root_id: i64,
     path: &str,
@@ -176,19 +180,64 @@ fn write_track(
             Some(err.to_string()),
         ),
     };
-    tx.execute(
-        "INSERT OR REPLACE INTO track (id, root_id, path, size, mtime, quick_key, state, error,
-             duration_ms, bitrate, sample_rate, channels, title, artist, album_artist, album,
-             track_no, disc_no, year, genre)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
-        params![
-            id, root_id, path, size, mtime, quick_key, state.as_str(), error,
-            meta.duration_ms, meta.bitrate, meta.sample_rate, meta.channels, meta.title,
-            meta.artist, meta.album_artist, meta.album, meta.track_no, meta.disc_no, meta.year,
-            meta.genre,
-        ],
-    )?;
+    let state_str = state.as_str();
+    let mut values = params![
+        root_id,
+        path,
+        size,
+        mtime,
+        quick_key,
+        state_str,
+        error,
+        meta.duration_ms,
+        meta.bitrate,
+        meta.sample_rate,
+        meta.channels,
+        meta.title,
+        meta.artist,
+        meta.album_artist,
+        meta.album,
+        meta.track_no,
+        meta.disc_no,
+        meta.year,
+        meta.genre,
+    ]
+    .to_vec();
+    match id {
+        None => conn.execute(
+            &format!("INSERT INTO track ({TRACK_FIELDS}) VALUES ({TRACK_VALUES})"),
+            values.as_slice(),
+        )?,
+        Some(id) => {
+            values.push(&id);
+            conn.execute(
+                &format!("UPDATE track SET ({TRACK_FIELDS}) = ({TRACK_VALUES}) WHERE id = ?20"),
+                values.as_slice(),
+            )?
+        }
+    };
     Ok(state)
+}
+
+impl Library {
+    /// Re-reads a track after Cantus rewrote its file. A file that vanished meanwhile is left
+    /// for the next scan to mark missing.
+    pub(crate) fn refresh_track(&self, id: i64, path: &Path) -> Result<()> {
+        let (Some(path_str), Ok(fs_meta)) = (path.to_str(), fs::metadata(path)) else {
+            return Ok(());
+        };
+        let (size, mtime) = size_and_mtime(&fs_meta);
+        let Ok(key) = quick_key(path, size) else {
+            return Ok(());
+        };
+        let root_id: i64 =
+            self.conn
+                .query_row("SELECT root_id FROM track WHERE id = ?1", [id], |r| {
+                    r.get(0)
+                })?;
+        write_track(&self.conn, Some(id), root_id, path_str, size, mtime, &key)?;
+        Ok(())
+    }
 }
 
 fn is_audio(path: &Path) -> bool {

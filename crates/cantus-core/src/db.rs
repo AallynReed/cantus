@@ -2,11 +2,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use rusqlite::{Connection, Row};
+use rusqlite::{Connection, OptionalExtension, Row};
 
 use crate::{Metadata, Result};
 
-const MIGRATIONS: &[&str] = &[include_str!("../migrations/001_init.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../migrations/001_init.sql"),
+    include_str!("../migrations/002_journal.sql"),
+];
 
 const TRACK_COLUMNS: &str = "id, path, state, error, duration_ms, bitrate, sample_rate, \
      channels, title, artist, album_artist, album, track_no, disc_no, year, genre";
@@ -82,6 +85,18 @@ impl Library {
         let mut stmt = self.conn.prepare("SELECT path FROM root ORDER BY path")?;
         let roots = stmt.query_map([], |r| r.get::<_, String>(0).map(PathBuf::from))?;
         Ok(roots.collect::<Result<_, _>>()?)
+    }
+
+    /// Paths of the given tracks; unknown ids are skipped.
+    pub(crate) fn track_paths(&self, ids: &[i64]) -> Result<Vec<(i64, PathBuf)>> {
+        let mut stmt = self.conn.prepare("SELECT path FROM track WHERE id = ?1")?;
+        let mut paths = Vec::with_capacity(ids.len());
+        for &id in ids {
+            if let Some(path) = stmt.query_row([id], |r| r.get::<_, String>(0)).optional()? {
+                paths.push((id, PathBuf::from(path)));
+            }
+        }
+        Ok(paths)
     }
 
     pub fn tracks(&self) -> Result<Vec<Track>> {

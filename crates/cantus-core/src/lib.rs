@@ -1,12 +1,16 @@
 //! Library logic for Cantus. No UI types live here.
 
 mod db;
+mod edit;
+mod journal;
 mod scan;
 mod tags;
 
 use std::path::PathBuf;
 
 pub use db::{Library, Track, TrackState};
+pub use edit::{Field, TagChange};
+pub use journal::{BatchReport, ChangeSetSummary};
 pub use scan::ScanReport;
 pub use tags::Metadata;
 
@@ -16,6 +20,8 @@ pub enum Error {
     Db(#[from] rusqlite::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[error("{0}")]
+    InvalidInput(String),
     #[error("path is not valid UTF-8: {}", .0.display())]
     NonUtf8Path(PathBuf),
 }

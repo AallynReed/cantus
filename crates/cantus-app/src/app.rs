@@ -1,27 +1,34 @@
 use std::collections::{BTreeSet, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cantus_core::{
-    BatchReport, ChangeSetSummary, DEFAULT_TEMPLATE, Endpoints, Identified, Library, Lookup, Pcm,
-    PlannedMove, ScanReport, Template, Track, TrackEdit, decode_preview,
+    BatchReport, ChangeSetSummary, DEFAULT_TEMPLATE, Endpoints, Handoff, Identified, Library,
+    Lookup, Pcm, PlannedMove, ScanReport, SyncPlan, Template, TorrentSource, Torrents, Track,
+    TrackEdit, decode_preview, download_audio, preview_sync, run_sync,
 };
 use eframe::egui;
 
 use crate::editor::{self, Editor};
+use crate::import::{self, Import};
 use crate::organize::{self, Organize};
 use crate::player::Player;
 use crate::playlists::Playlists;
 use crate::review::{Accepted, Review};
 use crate::settings::{self, Settings};
+use crate::sync::{self, Sync};
 use crate::table::{self, Selection, Sort, SortKey};
 
 const TEMPLATE_SETTING: &str = "template";
 const PREVIEW_SECONDS: u32 = 60;
+const TORRENT_POLL: Duration = Duration::from_secs(1);
+const YT_DLP: &str = "yt-dlp";
+const RCLONE: &str = "rclone";
+const SNAPSHOT_NAME: &str = ".cantus-library.db";
 
 /// Background work runs on its own thread and database connection.
 type JobResult = Result<JobOutput, String>;
@@ -35,6 +42,8 @@ enum JobData {
     None,
     Plan(Vec<PlannedMove>),
     Identified(Vec<Identified>),
+    ImportPlan(i64, Vec<PlannedMove>),
+    SyncPlan(SyncPlan),
 }
 
 impl From<String> for JobOutput {
@@ -51,7 +60,9 @@ enum View {
     Library,
     Organize,
     Identify,
+    Import,
     Playlists,
+    Sync,
     History,
     Settings,
 }
@@ -70,7 +81,15 @@ pub struct App {
     progress: Arc<Mutex<String>>,
     cancel: Arc<AtomicBool>,
     review: Option<Review>,
+    import: Import,
+    sync: Sync,
+    roots: Vec<PathBuf>,
+    torrents: Option<Arc<Torrents>>,
+    starting_torrents: Option<Receiver<cantus_core::Result<Torrents>>>,
+    adding_torrent: Option<Receiver<Result<(), String>>>,
+    last_torrent_poll: Option<Instant>,
     playlists: Playlists,
+    torrents_started: bool,
     settings: Settings,
     player: Player,
     decoding: Option<Receiver<Result<Pcm, String>>>,
@@ -107,7 +126,15 @@ impl App {
             progress: Arc::default(),
             cancel: Arc::default(),
             review: None,
+            import: Import::default(),
+            sync: Sync::default(),
+            roots: Vec::new(),
+            torrents: None,
+            starting_torrents: None,
+            adding_torrent: None,
+            last_torrent_poll: None,
             playlists: Playlists::default(),
+            torrents_started: false,
             settings,
             player: Player::default(),
             decoding: None,
@@ -133,6 +160,9 @@ impl App {
                 if let Err(err) = self.playlists.refresh(&self.library) {
                     self.status = format!("Cannot load playlists: {err}");
                 }
+                self.roots = self.library.roots().unwrap_or_default();
+                self.import.batches = self.library.inbox().unwrap_or_default();
+                self.import.plan = None;
             }
             Err(err) => self.status = format!("Cannot load library: {err}"),
         }
@@ -181,6 +211,8 @@ impl App {
                         self.review = Some(Review::new(results, &self.tracks));
                         self.view = View::Identify;
                     }
+                    JobData::ImportPlan(batch, plan) => self.import.plan = Some((batch, plan)),
+                    JobData::SyncPlan(plan) => self.sync.plan = Some(plan),
                 }
             }
             Err(err) => self.status = err,
@@ -323,6 +355,220 @@ impl App {
         }
     }
 
+    fn start_torrents(&mut self, ctx: &egui::Context) {
+        if self.torrents.is_some() || self.starting_torrents.is_some() {
+            return;
+        }
+        let state_dir = self.db_path.with_file_name("torrents");
+        let config = self.settings.torrent_config(state_dir);
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        thread::spawn(move || {
+            // The receiver is gone only if the app closed.
+            let _ = tx.send(Torrents::start(config));
+            ctx.request_repaint();
+        });
+        self.starting_torrents = Some(rx);
+    }
+
+    /// Picks up engine start-up, finished adds, and download progress once a second.
+    fn poll_torrents(&mut self, ctx: &egui::Context) {
+        if let Some(rx) = &self.starting_torrents
+            && let Ok(started) = rx.try_recv()
+        {
+            self.starting_torrents = None;
+            match started {
+                Ok(torrents) => self.torrents = Some(Arc::new(torrents)),
+                Err(err) => self.status = format!("Cannot start the torrent engine: {err}"),
+            }
+        }
+        if let Some(rx) = &self.adding_torrent
+            && let Ok(added) = rx.try_recv()
+        {
+            self.adding_torrent = None;
+            self.status = match added {
+                Ok(()) => "Torrent added. Pick its files and press Start.".to_owned(),
+                Err(err) => err,
+            };
+            self.last_torrent_poll = None;
+        }
+        let Some(torrents) = self.torrents.clone() else {
+            return;
+        };
+        ctx.request_repaint_after(TORRENT_POLL);
+        if self
+            .last_torrent_poll
+            .is_some_and(|at| at.elapsed() < TORRENT_POLL)
+        {
+            return;
+        }
+        self.last_torrent_poll = Some(Instant::now());
+        self.import.statuses = torrents.list();
+        self.import.files = self
+            .import
+            .statuses
+            .iter()
+            .map(|s| (s.id, torrents.files(s.id)))
+            .collect();
+        match self.library.collect_finished(&torrents) {
+            Ok(names) if !names.is_empty() => {
+                self.status = format!("Ready to import: {}", names.join(", "));
+                self.import.batches = self.library.inbox().unwrap_or_default();
+            }
+            Ok(_) => {}
+            Err(err) => self.status = format!("Cannot update the Inbox: {err}"),
+        }
+    }
+
+    fn add_link(&mut self, ctx: &egui::Context, link: String) {
+        if link.starts_with("magnet:") {
+            self.add_torrent(ctx, TorrentSource::Magnet(link));
+        } else {
+            self.import_url(ctx, link);
+        }
+    }
+
+    fn add_torrent(&mut self, ctx: &egui::Context, source: TorrentSource) {
+        let Some(torrents) = self.torrents.clone() else {
+            self.status = "Enable the torrent engine in Settings first".into();
+            self.view = View::Settings;
+            return;
+        };
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        thread::spawn(move || {
+            let added = torrents.add(source).map(drop).map_err(|e| e.to_string());
+            // The receiver is gone only if the app closed.
+            let _ = tx.send(added);
+            ctx.request_repaint();
+        });
+        self.adding_torrent = Some(rx);
+        self.status = "Adding torrent…".into();
+    }
+
+    fn import_url(&mut self, ctx: &egui::Context, url: String) {
+        let folder = format!("web-{}", unix_now());
+        let dest = self.settings.download_dir.join(folder);
+        self.run_job(ctx, "Downloading", move |library| {
+            std::fs::create_dir_all(&dest)?;
+            let files = download_audio(Path::new(YT_DLP), &url, &dest)
+                .map_err(cantus_core::Error::InvalidInput)?;
+            let name = files[0]
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            library.add_to_inbox("web", &name, &files)?;
+            Ok(format!("Ready to import: {name}").into())
+        });
+    }
+
+    fn plan_import(&mut self, ctx: &egui::Context, batch: i64) {
+        let Some(root) = self.roots.first().cloned() else {
+            self.status = "Add a library folder first".into();
+            return;
+        };
+        let template = match Template::parse(&self.organize.source) {
+            Ok(template) => template,
+            Err(err) => {
+                self.status = format!("Fix the path template in Organize first: {err}");
+                return;
+            }
+        };
+        self.run_job(ctx, "Planning", move |library| {
+            let plan = library.plan_import(batch, &root, &template)?;
+            Ok(JobOutput {
+                status: format!("{} files ready to import", plan.len()),
+                data: JobData::ImportPlan(batch, plan),
+            })
+        });
+    }
+
+    fn apply_import(&mut self, ctx: &egui::Context, batch: i64, plan: Vec<PlannedMove>) {
+        let handoff = if self.import.hardlink {
+            Handoff::Hardlink
+        } else {
+            Handoff::Copy
+        };
+        self.run_job(ctx, "Importing", move |library| {
+            let (_, report) = library.import_inbox(batch, plan, handoff)?;
+            Ok(batch_summary("Imported", &report).into())
+        });
+    }
+
+    fn import_view(&mut self, ui: &mut egui::Ui, busy: bool) {
+        let mut action = import::Action::None;
+        let on = self.torrents.is_some();
+        egui::CentralPanel::default().show(ui, |ui| action = self.import.show(ui, on, busy));
+        let ctx = ui.ctx().clone();
+        let torrents = self.torrents.clone();
+        let outcome = match action {
+            import::Action::None => Ok(()),
+            import::Action::Add(link) => {
+                self.add_link(&ctx, link);
+                Ok(())
+            }
+            import::Action::AddFile(file) => match std::fs::read(&file) {
+                Ok(bytes) => {
+                    self.add_torrent(&ctx, TorrentSource::File(bytes));
+                    Ok(())
+                }
+                Err(err) => Err(err.to_string()),
+            },
+            import::Action::Plan(batch) => {
+                self.plan_import(&ctx, batch);
+                Ok(())
+            }
+            import::Action::Apply(batch, plan) => {
+                self.apply_import(&ctx, batch, plan);
+                Ok(())
+            }
+            import::Action::Dismiss(batch) => {
+                let result = self.library.dismiss_inbox(batch).map_err(|e| e.to_string());
+                self.import.batches = self.library.inbox().unwrap_or_default();
+                result
+            }
+            import::Action::Resume(id) => with_engine(torrents, |t| t.resume(id)),
+            import::Action::Pause(id) => with_engine(torrents, |t| t.pause(id)),
+            import::Action::Remove(id) => with_engine(torrents, |t| t.remove(id, false)),
+            import::Action::Select(id, files) => {
+                with_engine(torrents, |t| t.select_files(id, &files))
+            }
+        };
+        if let Err(err) = outcome {
+            self.status = err;
+        }
+    }
+
+    fn sync_view(&mut self, ui: &mut egui::Ui, busy: bool) {
+        let mut action = sync::Action::None;
+        let roots = &self.roots;
+        let sync = &mut self.sync;
+        egui::CentralPanel::default().show(ui, |ui| action = sync.show(ui, roots, busy));
+        match action {
+            sync::Action::None => {}
+            sync::Action::Preview(root) => {
+                let (remote, mirror) = (self.sync.remote.trim().to_owned(), self.sync.mirror);
+                self.run_job(ui.ctx(), "Checking", move |_| {
+                    let plan = preview_sync(Path::new(RCLONE), &root, &remote, mirror)
+                        .map_err(cantus_core::Error::InvalidInput)?;
+                    Ok(JobOutput {
+                        status: "Dry run finished".to_owned(),
+                        data: JobData::SyncPlan(plan),
+                    })
+                });
+            }
+            sync::Action::Run(root, plan) => {
+                self.sync.plan = None;
+                self.run_job(ui.ctx(), "Syncing", move |library| {
+                    library.snapshot(&root.join(SNAPSHOT_NAME))?;
+                    run_sync(Path::new(RCLONE), &plan).map_err(cantus_core::Error::InvalidInput)?;
+                    Ok("Sync finished".to_owned().into())
+                });
+            }
+        }
+    }
+
     fn add_to_playlist(&mut self, id: i64) {
         let ids: Vec<i64> = self.selection.ids.iter().copied().collect();
         self.status = match self.library.add_to_playlist(id, &ids) {
@@ -343,10 +589,16 @@ impl App {
     fn settings_view(&mut self, ui: &mut egui::Ui) {
         let library = &self.library;
         let settings = &mut self.settings;
-        let mut error = None;
-        egui::CentralPanel::default().show(ui, |ui| error = settings.show(ui, library));
-        if let Some(error) = error {
-            self.status = error;
+        let mut change = settings::Change::None;
+        egui::CentralPanel::default().show(ui, |ui| change = settings.show(ui, library));
+        match change {
+            settings::Change::None => {}
+            settings::Change::Failed(error) => self.status = error,
+            settings::Change::Torrents(true) => self.start_torrents(ui.ctx()),
+            settings::Change::Torrents(false) => {
+                self.torrents = None;
+                self.import.statuses.clear();
+            }
         }
     }
 
@@ -467,6 +719,13 @@ impl App {
     }
 }
 
+fn with_engine(
+    torrents: Option<Arc<Torrents>>,
+    action: impl FnOnce(&Torrents) -> cantus_core::Result<()>,
+) -> Result<(), String> {
+    torrents.map_or(Ok(()), |t| action(&t).map_err(|e| e.to_string()))
+}
+
 fn scan(library: &mut Library, root: Option<PathBuf>) -> cantus_core::Result<ScanReport> {
     let roots = match root {
         Some(root) => vec![root],
@@ -532,6 +791,11 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
         self.poll_job();
         self.poll_preview();
+        self.poll_torrents(ui.ctx());
+        if self.settings.torrents && !self.torrents_started {
+            self.torrents_started = true;
+            self.start_torrents(ui.ctx());
+        }
         if self.player.is_playing() {
             // Nothing else repaints when the clip ends and the button must flip back.
             ui.ctx().request_repaint_after(Duration::from_millis(500));
@@ -543,7 +807,9 @@ impl eframe::App for App {
                 ui.selectable_value(&mut self.view, View::Library, "Library");
                 ui.selectable_value(&mut self.view, View::Organize, "Organize");
                 ui.selectable_value(&mut self.view, View::Identify, "Review");
+                ui.selectable_value(&mut self.view, View::Import, "Import");
                 ui.selectable_value(&mut self.view, View::Playlists, "Playlists");
+                ui.selectable_value(&mut self.view, View::Sync, "Sync");
                 ui.selectable_value(&mut self.view, View::History, "History");
                 ui.selectable_value(&mut self.view, View::Settings, "Settings");
                 ui.separator();
@@ -580,7 +846,9 @@ impl eframe::App for App {
             View::Library => self.library_view(ui, busy),
             View::Organize => self.organize_view(ui, busy),
             View::Identify => self.identify_view(ui, busy),
+            View::Import => self.import_view(ui, busy),
             View::Playlists => self.playlists_view(ui),
+            View::Sync => self.sync_view(ui, busy),
             View::History => self.history_view(ui, busy),
             View::Settings => self.settings_view(ui),
         }
@@ -591,7 +859,6 @@ impl eframe::App for App {
 mod tests {
     use super::*;
     use egui_kittest::{Harness, kittest::Queryable};
-    use std::path::Path;
 
     #[test]
     fn starts_with_empty_library() {
@@ -632,6 +899,15 @@ mod tests {
         harness.run();
         harness.get_by_label("Organize 1 selected track");
         harness.get_by_label("Preview moves");
+
+        harness.get_by_label("Import").click();
+        harness.run();
+        harness.get_by_label("No torrents");
+        harness.get_by_label("Nothing waiting to be imported");
+
+        harness.get_by_label("Sync").click();
+        harness.run();
+        harness.get_by_label("Dry run");
 
         harness.get_by_label("Playlists").click();
         harness.run();

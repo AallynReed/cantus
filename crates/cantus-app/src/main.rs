@@ -2,11 +2,13 @@
 
 mod app;
 mod editor;
+mod import;
 mod organize;
 mod player;
 mod playlists;
 mod review;
 mod settings;
+mod sync;
 mod table;
 
 use std::path::PathBuf;

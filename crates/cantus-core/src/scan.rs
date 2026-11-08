@@ -221,6 +221,33 @@ fn write_track(
 }
 
 impl Library {
+    /// Adds a file Cantus just placed under a library root. `None` if it vanished.
+    pub(crate) fn insert_track(&self, root: &Path, path: &Path) -> Result<Option<i64>> {
+        let root_str = root
+            .to_str()
+            .ok_or_else(|| Error::NonUtf8Path(root.into()))?;
+        let path_str = path
+            .to_str()
+            .ok_or_else(|| Error::NonUtf8Path(path.into()))?;
+        let (Ok(fs_meta), root_id) = (
+            fs::metadata(path),
+            self.conn
+                .execute("INSERT OR IGNORE INTO root (path) VALUES (?1)", [root_str]),
+        ) else {
+            return Ok(None);
+        };
+        root_id?;
+        let root_id: i64 =
+            self.conn
+                .query_row("SELECT id FROM root WHERE path = ?1", [root_str], |r| {
+                    r.get(0)
+                })?;
+        let (size, mtime) = size_and_mtime(&fs_meta);
+        let key = quick_key(path, size)?;
+        write_track(&self.conn, None, root_id, path_str, size, mtime, &key)?;
+        Ok(Some(self.conn.last_insert_rowid()))
+    }
+
     /// Re-reads a track after Cantus rewrote its file. A file that vanished meanwhile is left
     /// for the next scan to mark missing.
     pub(crate) fn refresh_track(&self, id: i64, path: &Path) -> Result<()> {
@@ -241,7 +268,7 @@ impl Library {
     }
 }
 
-fn is_audio(path: &Path) -> bool {
+pub(crate) fn is_audio(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| AUDIO_EXTENSIONS.iter().any(|a| a.eq_ignore_ascii_case(e)))

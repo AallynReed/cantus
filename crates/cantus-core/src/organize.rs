@@ -71,13 +71,13 @@ impl Library {
 
 /// Paths compare case-insensitively: two names differing only by case collide on Windows
 /// and macOS, and a library must stay portable.
-fn key(path: &Path) -> String {
+pub(crate) fn key(path: &Path) -> String {
     path.to_string_lossy().to_lowercase()
 }
 
 /// `base`, or `base (2)`, `base (3)`... The track's own current path always counts as free,
 /// so organizing twice changes nothing.
-fn free_path(base: &Path, taken: &HashSet<String>, own: &str) -> (PathBuf, bool) {
+pub(crate) fn free_path(base: &Path, taken: &HashSet<String>, own: &str) -> (PathBuf, bool) {
     let mut n = 1;
     loop {
         let candidate = if n == 1 {

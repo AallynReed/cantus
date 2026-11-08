@@ -15,7 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{OptionalExtension, params};
 
-use crate::{Error, Library, PlannedMove, Result};
+use crate::{Error, Handoff, Library, PlannedMove, Result};
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct BatchReport {
@@ -72,6 +72,102 @@ impl Library {
             }
         }
         Ok((change_set, report))
+    }
+
+    /// Copies new files into the library as one undoable change set. Sources are not touched.
+    pub(crate) fn copy_files(
+        &mut self,
+        description: &str,
+        files: Vec<PlannedMove>,
+        handoff: Handoff,
+    ) -> Result<(i64, BatchReport)> {
+        let change_set = self.new_change_set(description)?;
+        let mut report = BatchReport::default();
+        for m in files {
+            match self.copy_one(change_set, &m, handoff)? {
+                Ok(()) => report.done += 1,
+                Err(reason) => report.failed.push((m.from, reason)),
+            }
+        }
+        Ok((change_set, report))
+    }
+
+    fn copy_one(&self, change_set: i64, m: &PlannedMove, handoff: Handoff) -> FileOutcome {
+        let digest = match hash_file(&m.from) {
+            Ok(digest) => digest,
+            Err(err) => return Ok(Err(err.to_string())),
+        };
+        self.conn.execute(
+            "INSERT INTO journal (change_set_id, path, new_path, step, hash_before, op)
+             VALUES (?1, ?2, ?3, 'applying', ?4, 'copy')",
+            params![change_set, utf8(&m.from)?, utf8(&m.to)?, digest],
+        )?;
+        let id = self.conn.last_insert_rowid();
+        if let Err(err) = place_file(&m.from, &m.to, &digest, handoff) {
+            return self.fail(id, err.to_string());
+        }
+        self.finish_copy(id, &m.root, &m.to)?;
+        Ok(Ok(()))
+    }
+
+    fn finish_copy(&self, id: i64, root: &Path, to: &Path) -> Result<()> {
+        let track_id = self.insert_track(root, to)?;
+        self.conn.execute(
+            "UPDATE journal SET track_id = ?1, step = 'done', error = NULL WHERE id = ?2",
+            params![track_id, id],
+        )?;
+        Ok(())
+    }
+
+    fn undo_copy(&self, row: &DoneRow, copy: &Path) -> FileOutcome {
+        if hash_file(copy).ok().as_ref() != Some(&row.hash_before) {
+            return Ok(Err("file changed since the import, left as is".into()));
+        }
+        let root = row.track_id.map_or(Ok(None), |id| self.track_root(id))?;
+        self.set_step(row.id, "undoing", None)?;
+        if let Err(err) = fs::remove_file(copy) {
+            self.set_step(row.id, "done", Some(&err.to_string()))?;
+            return Ok(Err(err.to_string()));
+        }
+        self.settle_undone_copy(row.id, row.track_id)?;
+        if let Some(root) = root {
+            prune_empty_dirs(copy, &root);
+        }
+        Ok(Ok(()))
+    }
+
+    fn settle_undone_copy(&self, id: i64, track_id: Option<i64>) -> Result<()> {
+        if let Some(track_id) = track_id {
+            self.conn
+                .execute("DELETE FROM track WHERE id = ?1", [track_id])?;
+        }
+        self.set_step(id, "undone", None)
+    }
+
+    fn settle_copy(
+        &self,
+        id: i64,
+        track_id: Option<i64>,
+        to: &Path,
+        step: &str,
+        digest: &[u8],
+    ) -> Result<()> {
+        let _ = fs::remove_file(temp_path(to));
+        let intact = hash_file(to).is_ok_and(|h| h == digest);
+        match (step, intact) {
+            ("undoing", false) if !to.exists() => self.settle_undone_copy(id, track_id),
+            ("undoing", _) => self.set_step(id, "done", Some("undo interrupted, file kept")),
+            (_, true) if track_id.is_some() => self.set_step(id, "done", None),
+            (_, true) => {
+                let root = self
+                    .roots()?
+                    .into_iter()
+                    .find(|root| to.starts_with(root))
+                    .unwrap_or_else(|| to.parent().unwrap_or(to).to_path_buf());
+                self.finish_copy(id, &root, to)
+            }
+            _ => self.set_step(id, "failed", Some("interrupted, file not imported")),
+        }
     }
 
     fn new_change_set(&self, description: &str) -> Result<i64> {
@@ -171,7 +267,7 @@ impl Library {
         let rows = {
             let mut stmt = self.conn.prepare(
                 "SELECT id, track_id, path, hash_before, hash_after, prefix_len, suffix_len,
-                     old_middle, new_path
+                     old_middle, new_path, op
                  FROM journal WHERE change_set_id = ?1 AND step = 'done' ORDER BY id DESC",
             )?;
             stmt.query_map([change_set], |r| {
@@ -190,6 +286,7 @@ impl Library {
                         _ => None,
                     },
                     new_path: r.get::<_, Option<String>>(8)?.map(PathBuf::from),
+                    op: r.get(9)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?
@@ -197,14 +294,21 @@ impl Library {
 
         let mut report = BatchReport::default();
         for row in rows {
-            let outcome = match &row.new_path {
-                Some(new_path) => self.undo_move(&row, new_path)?,
-                None => self.undo_rewrite(&row)?,
+            let outcome = match (&row.new_path, row.op.as_deref()) {
+                (Some(copy), Some("copy")) => self.undo_copy(&row, copy)?,
+                (Some(new_path), _) => self.undo_move(&row, new_path)?,
+                (None, _) => self.undo_rewrite(&row)?,
             };
             match outcome {
                 Ok(()) => report.done += 1,
                 Err(reason) => report.failed.push((row.path, reason)),
             }
+        }
+        if report.failed.is_empty() {
+            self.conn.execute(
+                "UPDATE inbox SET change_set_id = NULL WHERE change_set_id = ?1",
+                [change_set],
+            )?;
         }
         Ok(report)
     }
@@ -292,7 +396,7 @@ impl Library {
     pub fn recover(&mut self) -> Result<usize> {
         let rows = {
             let mut stmt = self.conn.prepare(
-                "SELECT id, track_id, path, step, hash_before, hash_after, new_path FROM journal
+                "SELECT id, track_id, path, step, hash_before, hash_after, new_path, op FROM journal
                  WHERE step IN ('planned', 'applying', 'undoing')",
             )?;
             stmt.query_map([], |r| {
@@ -304,12 +408,17 @@ impl Library {
                     r.get::<_, Vec<u8>>(4)?,
                     r.get::<_, Option<Vec<u8>>>(5)?,
                     r.get::<_, Option<String>>(6)?.map(PathBuf::from),
+                    r.get::<_, Option<String>>(7)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?
         };
 
-        for (id, track_id, path, step, before, after, new_path) in &rows {
+        for (id, track_id, path, step, before, after, new_path, op) in &rows {
+            if let (Some(copy), Some("copy")) = (new_path, op.as_deref()) {
+                self.settle_copy(*id, *track_id, copy, step, before)?;
+                continue;
+            }
             if let Some(new_path) = new_path {
                 self.settle_move(*id, *track_id, path, new_path, step, before)?;
                 continue;
@@ -414,6 +523,7 @@ struct DoneRow {
     hash_after: Option<Vec<u8>>,
     delta: Option<Delta>,
     new_path: Option<PathBuf>,
+    op: Option<String>,
 }
 
 /// The bytes of the old file that differ from the new one, enough to rebuild the old file.
@@ -518,9 +628,31 @@ fn rename_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
     sync_parent(to)
 }
 
-/// Copies to a temp file, verifies it against `digest`, renames it into place, then deletes
-/// the source. The source is untouched unless the copy is complete and correct.
+/// Moves across volumes. The source is untouched unless the copy is complete and correct.
 fn copy_then_remove(from: &Path, to: &Path, digest: &[u8]) -> io::Result<()> {
+    copy_verified(from, to, digest)?;
+    fs::remove_file(from)
+}
+
+/// Puts a new file in the library without replacing anything or changing the source.
+fn place_file(from: &Path, to: &Path, digest: &[u8], handoff: Handoff) -> io::Result<()> {
+    if to.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "destination already exists",
+        ));
+    }
+    if let Some(dir) = to.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    if handoff == Handoff::Hardlink && fs::hard_link(from, to).is_ok() {
+        return sync_parent(to);
+    }
+    copy_verified(from, to, digest)
+}
+
+/// Copies to a temp file, verifies it against `digest`, then renames it into place.
+fn copy_verified(from: &Path, to: &Path, digest: &[u8]) -> io::Result<()> {
     let tmp = temp_path(to);
     let copied = fs::copy(from, &tmp)
         // Windows can only flush a handle opened for writing.
@@ -540,9 +672,8 @@ fn copy_then_remove(from: &Path, to: &Path, digest: &[u8]) -> io::Result<()> {
         .and_then(|()| sync_parent(to));
     if copied.is_err() {
         let _ = fs::remove_file(&tmp);
-        return copied;
     }
-    fs::remove_file(from)
+    copied
 }
 
 /// Removes `file`'s parent folders up to `root`, stopping at the first that is not empty.
@@ -820,6 +951,60 @@ mod tests {
                 tracked,
                 if at_new { new.clone() } else { old.clone() },
                 "{label}"
+            );
+            assert_eq!(lib.recover().unwrap(), 0, "{label}");
+        }
+    }
+
+    #[test]
+    fn recovery_settles_every_interrupted_import() {
+        // (destination holds, step, expected step, track exists afterwards)
+        type Case<'a> = (Option<&'a [u8]>, &'a str, &'a str, bool);
+        let cases: [Case; 5] = [
+            (None, "applying", "failed", false),
+            (Some(b"partial"), "applying", "failed", false),
+            (Some(b"audio"), "applying", "done", true),
+            (None, "undoing", "undone", false),
+            (Some(b"audio"), "undoing", "done", true),
+        ];
+        for (holds, interrupted, expected, tracked) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let lib_root = dir.path().join("lib");
+            fs::create_dir(&lib_root).unwrap();
+            let (from, to) = (dir.path().join("a.bin"), lib_root.join("b.bin"));
+            fs::write(&from, b"audio").unwrap();
+            let mut lib = Library::open_in_memory().unwrap();
+            let m = PlannedMove {
+                track_id: 0,
+                root: lib_root.clone(),
+                from: from.clone(),
+                to: to.clone(),
+                collision: false,
+            };
+            lib.copy_files("import", vec![m], Handoff::Copy).unwrap();
+            lib.conn
+                .execute("UPDATE journal SET step = ?1", [interrupted])
+                .unwrap();
+            fs::remove_file(&to).unwrap();
+            if interrupted == "applying" {
+                lib.conn.execute("DELETE FROM track", []).unwrap();
+                lib.conn
+                    .execute("UPDATE journal SET track_id = NULL", [])
+                    .unwrap();
+            }
+            if let Some(bytes) = holds {
+                fs::write(&to, bytes).unwrap();
+            }
+
+            assert_eq!(lib.recover().unwrap(), 1);
+
+            let label = format!("{holds:?} {interrupted}");
+            assert_eq!(step(&lib).0, expected, "{label}");
+            assert_eq!(!lib.tracks().unwrap().is_empty(), tracked, "{label}");
+            assert_eq!(
+                fs::read(&from).unwrap(),
+                b"audio",
+                "{label}: source untouched"
             );
             assert_eq!(lib.recover().unwrap(), 0, "{label}");
         }

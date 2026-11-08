@@ -4,6 +4,7 @@ mod db;
 mod edit;
 mod fingerprint;
 mod identify;
+mod inbox;
 mod journal;
 mod lookup;
 mod organize;
@@ -12,6 +13,7 @@ mod playlist;
 mod scan;
 mod tags;
 mod template;
+mod torrent;
 
 use std::path::PathBuf;
 
@@ -19,6 +21,7 @@ pub use db::{Library, Track, TrackState};
 pub use edit::{Field, TagChange, TrackEdit};
 pub use fingerprint::{Pcm, decode_preview};
 pub use identify::{Candidate, FieldDiff, Identified};
+pub use inbox::{Handoff, InboxBatch};
 pub use journal::{BatchReport, ChangeSetSummary};
 pub use lookup::{Endpoints, Lookup};
 pub use organize::PlannedMove;
@@ -26,6 +29,9 @@ pub use playlist::{Entry, ImportReport, PlaylistSummary};
 pub use scan::ScanReport;
 pub use tags::Metadata;
 pub use template::{DEFAULT_TEMPLATE, Template};
+pub use torrent::{
+    TorrentConfig, TorrentFile, TorrentId, TorrentSource, TorrentState, TorrentStatus, Torrents,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

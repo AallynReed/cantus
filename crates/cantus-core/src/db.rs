@@ -12,6 +12,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/003_moves_and_settings.sql"),
     include_str!("../migrations/004_identify.sql"),
     include_str!("../migrations/005_playlists.sql"),
+    include_str!("../migrations/006_inbox.sql"),
 ];
 
 pub(crate) const TRACK_COLUMNS: &str = "id, path, state, error, duration_ms, bitrate, sample_rate, \

@@ -2,16 +2,21 @@
 
 A desktop music library manager. Scan your folders, identify tracks by audio fingerprint, fix tags and file names with a preview and full undo, and share playlists as plain files.
 
-Status: early development. Nothing is usable yet.
+Status: early development, no release yet.
 
-## Planned
+## Features
 
-- Library scan into SQLite
-- Identification via AcoustID and MusicBrainz, with a preview of every change and undo
-- Organizing files by an editable path template
-- Playlists as `.m3u8` and JSON
-- Built-in torrent downloads that feed straight into identify and organize
-- Optional sync through rclone, and URL import through yt-dlp
+- Scan folders into a SQLite library; unchanged files are skipped and moved files are recognized
+- Edit tags on many files at once, with every change undoable from History
+- Identify tracks by audio fingerprint (AcoustID) or by their tags (MusicBrainz), and review every change before it is written
+- Organize files with an editable path template, previewed first; files are never overwritten
+- Playlists as `.m3u8` and JSON; JSON files keep MusicBrainz ids, so they work across different folder layouts
+
+Tag writes and moves are journaled, so an interrupted change is settled on the next start and undo restores files byte for byte.
+
+Identify is off until enabled in Settings. Matching by audio needs a free [AcoustID](https://acoustid.org) API key; without one, Cantus searches by tags.
+
+Planned: torrent downloads that feed into identify and organize, sync through rclone, URL import through yt-dlp.
 
 ## Build
 

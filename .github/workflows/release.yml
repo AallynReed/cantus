@@ -119,7 +119,7 @@ jobs:
           subject-path: dist/*
       - name: Extract release notes
         run: |
-          awk -v v="${GITHUB_REF_NAME#v}" '$0 ~ "^## \[" v "\]" {f=1; next} /^## \[/ {f=0} f' CHANGELOG.md > notes.md
+          awk -v v="${GITHUB_REF_NAME#v}" 'index($0, "## [" v "]") == 1 {f=1; next} /^## / {f=0} f' CHANGELOG.md > notes.md
           test -s notes.md
       - run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --notes-file notes.md
         env:

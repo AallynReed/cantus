@@ -2,7 +2,10 @@
 
 mod db;
 mod edit;
+mod fingerprint;
+mod identify;
 mod journal;
+mod lookup;
 mod organize;
 mod paths;
 mod scan;
@@ -12,8 +15,11 @@ mod template;
 use std::path::PathBuf;
 
 pub use db::{Library, Track, TrackState};
-pub use edit::{Field, TagChange};
+pub use edit::{Field, TagChange, TrackEdit};
+pub use fingerprint::{Pcm, decode_preview};
+pub use identify::{Candidate, FieldDiff, Identified};
 pub use journal::{BatchReport, ChangeSetSummary};
+pub use lookup::{Endpoints, Lookup};
 pub use organize::PlannedMove;
 pub use scan::ScanReport;
 pub use tags::Metadata;

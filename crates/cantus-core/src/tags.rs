@@ -19,12 +19,15 @@ pub struct Metadata {
     pub disc_no: Option<u32>,
     pub year: Option<u16>,
     pub genre: Option<String>,
+    pub recording_mbid: Option<String>,
+    pub release_mbid: Option<String>,
 }
 
 pub fn read(path: &Path) -> Result<Metadata, FileParseError> {
     let file = lofty::read_from_path(path)?;
     let props = file.properties();
     let tag = file.primary_tag().or_else(|| file.first_tag());
+    let item = |key: ItemKey| tag.and_then(|t| t.get_string(key)).map(str::to_owned);
     let text =
         |get: fn(&lofty::tag::Tag) -> Option<Cow<'_, str>>| tag.and_then(get).map(Cow::into_owned);
 
@@ -35,13 +38,13 @@ pub fn read(path: &Path) -> Result<Metadata, FileParseError> {
         channels: props.channels(),
         title: text(|t| t.title()),
         artist: text(|t| t.artist()),
-        album_artist: tag
-            .and_then(|t| t.get_string(ItemKey::AlbumArtist))
-            .map(str::to_owned),
+        album_artist: item(ItemKey::AlbumArtist),
         album: text(|t| t.album()),
         track_no: tag.and_then(|t| t.track()),
         disc_no: tag.and_then(|t| t.disk()),
         year: tag.and_then(|t| t.date()).map(|d| d.year),
         genre: text(|t| t.genre()),
+        recording_mbid: item(ItemKey::MusicBrainzRecordingId),
+        release_mbid: item(ItemKey::MusicBrainzReleaseId),
     })
 }

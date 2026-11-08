@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::io::{Cursor, Seek};
 
 use lofty::config::WriteOptions;
+use lofty::picture::{Picture, PictureType};
 use lofty::prelude::*;
 use lofty::probe::Probe;
 use lofty::tag::Tag;
@@ -17,9 +19,12 @@ pub enum Field {
     DiscNo,
     Year,
     Genre,
+    RecordingMbid,
+    ReleaseMbid,
 }
 
 impl Field {
+    /// The fields a person edits by hand.
     pub const ALL: [Self; 8] = [
         Self::Title,
         Self::Artist,
@@ -29,6 +34,19 @@ impl Field {
         Self::DiscNo,
         Self::Year,
         Self::Genre,
+    ];
+
+    /// The fields a MusicBrainz match can fill in.
+    pub const IDENTIFIED: [Self; 9] = [
+        Self::Title,
+        Self::Artist,
+        Self::AlbumArtist,
+        Self::Album,
+        Self::TrackNo,
+        Self::DiscNo,
+        Self::Year,
+        Self::RecordingMbid,
+        Self::ReleaseMbid,
     ];
 
     pub fn label(self) -> &'static str {
@@ -41,6 +59,8 @@ impl Field {
             Self::DiscNo => "Disc",
             Self::Year => "Year",
             Self::Genre => "Genre",
+            Self::RecordingMbid => "MusicBrainz recording",
+            Self::ReleaseMbid => "MusicBrainz release",
         }
     }
 
@@ -54,6 +74,8 @@ impl Field {
             Self::DiscNo => m.disc_no.map(|n| n.to_string()),
             Self::Year => m.year.map(|n| n.to_string()),
             Self::Genre => m.genre.clone(),
+            Self::RecordingMbid => m.recording_mbid.clone(),
+            Self::ReleaseMbid => m.release_mbid.clone(),
         }
     }
 
@@ -67,6 +89,8 @@ impl Field {
             Self::DiscNo => ItemKey::DiscNumber,
             Self::Year => ItemKey::RecordingDate,
             Self::Genre => ItemKey::Genre,
+            Self::RecordingMbid => ItemKey::MusicBrainzRecordingId,
+            Self::ReleaseMbid => ItemKey::MusicBrainzReleaseId,
         }
     }
 }
@@ -100,6 +124,24 @@ impl TagChange {
     }
 }
 
+/// The tag changes for one file, and optionally a new front cover image.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TrackEdit {
+    pub track_id: i64,
+    pub changes: Vec<TagChange>,
+    pub cover: Option<Vec<u8>>,
+}
+
+type Normalized = Vec<(Field, Option<String>)>;
+
+fn normalize(changes: &[TagChange]) -> Result<Normalized> {
+    changes
+        .iter()
+        .map(|c| Ok((c.field, c.normalized()?)))
+        .collect::<Result<_, String>>()
+        .map_err(Error::InvalidInput)
+}
+
 impl Library {
     /// Writes `changes` to the files of `track_ids` as one undoable change set.
     pub fn edit_tags(
@@ -107,27 +149,53 @@ impl Library {
         track_ids: &[i64],
         changes: &[TagChange],
     ) -> Result<(i64, BatchReport)> {
-        let changes = changes
-            .iter()
-            .map(|c| Ok((c.field, c.normalized()?)))
-            .collect::<Result<Vec<_>, String>>()
-            .map_err(Error::InvalidInput)?;
-        let files = self.track_paths(track_ids)?;
         let fields: Vec<_> = changes
             .iter()
-            .map(|(f, _)| f.label().to_lowercase())
+            .map(|c| c.field.label().to_lowercase())
             .collect();
-        let n = files.len();
+        let n = track_ids.len();
         let description = format!(
             "Edit {} on {n} track{}",
             fields.join(", "),
             if n == 1 { "" } else { "s" }
         );
-        self.rewrite_files(&description, files, |bytes| set_tags(bytes, &changes))
+        let edits = track_ids
+            .iter()
+            .map(|&track_id| TrackEdit {
+                track_id,
+                changes: changes.to_vec(),
+                cover: None,
+            })
+            .collect();
+        self.apply_edits(&description, edits)
+    }
+
+    /// Applies per-file edits as one undoable change set. Nothing is written if any value
+    /// is invalid.
+    pub fn apply_edits(
+        &mut self,
+        description: &str,
+        edits: Vec<TrackEdit>,
+    ) -> Result<(i64, BatchReport)> {
+        let mut by_track = HashMap::with_capacity(edits.len());
+        let mut ids = Vec::with_capacity(edits.len());
+        for edit in edits {
+            ids.push(edit.track_id);
+            by_track.insert(edit.track_id, (normalize(&edit.changes)?, edit.cover));
+        }
+        let files = self.track_paths(&ids)?;
+        self.rewrite_files(description, files, |id, bytes| {
+            let (changes, cover) = by_track.get(&id).ok_or("track has no edit")?;
+            set_tags(bytes, changes, cover.as_deref())
+        })
     }
 }
 
-fn set_tags(bytes: &[u8], changes: &[(Field, Option<String>)]) -> Result<Vec<u8>, String> {
+fn set_tags(
+    bytes: &[u8],
+    changes: &[(Field, Option<String>)],
+    cover: Option<&[u8]>,
+) -> Result<Vec<u8>, String> {
     let mut file = Cursor::new(bytes.to_vec());
     let mut tagged = Probe::new(&mut file)
         .guess_file_type()
@@ -156,6 +224,13 @@ fn set_tags(bytes: &[u8], changes: &[(Field, Option<String>)]) -> Result<Vec<u8>
             }
             None => tag.remove_key(field.key()),
         }
+    }
+
+    if let Some(cover) = cover {
+        let mut picture = Picture::from_reader(&mut &*cover).map_err(|e| e.to_string())?;
+        picture.set_pic_type(PictureType::CoverFront);
+        tag.remove_picture_type(PictureType::CoverFront);
+        tag.push_picture(picture);
     }
 
     file.rewind().map_err(|e| e.to_string())?;

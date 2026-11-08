@@ -158,9 +158,8 @@ fn known_tracks(tx: &Transaction, root_id: i64) -> Result<HashMap<String, Known>
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
-const TRACK_FIELDS: &str = "root_id, path, size, mtime, quick_key, state, error, duration_ms,      bitrate, sample_rate, channels, title, artist, album_artist, album, track_no, disc_no, year, genre";
-const TRACK_VALUES: &str =
-    "?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19";
+const TRACK_FIELDS: &str = "root_id, path, size, mtime, quick_key, state, error, duration_ms,      bitrate, sample_rate, channels, title, artist, album_artist, album, track_no, disc_no, year, genre, recording_mbid, release_mbid";
+const TRACK_VALUES: &str = "?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21";
 
 /// Reads tags and inserts (`id` = None) or updates a track row. Returns the stored state.
 fn write_track(
@@ -201,6 +200,8 @@ fn write_track(
         meta.disc_no,
         meta.year,
         meta.genre,
+        meta.recording_mbid,
+        meta.release_mbid,
     ]
     .to_vec();
     match id {
@@ -211,7 +212,7 @@ fn write_track(
         Some(id) => {
             values.push(&id);
             conn.execute(
-                &format!("UPDATE track SET ({TRACK_FIELDS}) = ({TRACK_VALUES}) WHERE id = ?20"),
+                &format!("UPDATE track SET ({TRACK_FIELDS}) = ({TRACK_VALUES}) WHERE id = ?22"),
                 values.as_slice(),
             )?
         }

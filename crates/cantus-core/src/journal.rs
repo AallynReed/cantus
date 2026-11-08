@@ -44,7 +44,7 @@ impl Library {
         &mut self,
         description: &str,
         files: Vec<(i64, PathBuf)>,
-        mut transform: impl FnMut(&[u8]) -> Result<Vec<u8>, String>,
+        mut transform: impl FnMut(i64, &[u8]) -> Result<Vec<u8>, String>,
     ) -> Result<(i64, BatchReport)> {
         let change_set = self.new_change_set(description)?;
         let mut report = BatchReport::default();
@@ -124,7 +124,7 @@ impl Library {
         change_set: i64,
         track_id: i64,
         path: &Path,
-        transform: &mut impl FnMut(&[u8]) -> Result<Vec<u8>, String>,
+        transform: &mut impl FnMut(i64, &[u8]) -> Result<Vec<u8>, String>,
     ) -> FileOutcome {
         let path_str = utf8(path)?;
         let old = match fs::read(path) {
@@ -139,7 +139,7 @@ impl Library {
         let id = self.conn.last_insert_rowid();
 
         // A panic in a format library must fail this file, not the whole batch.
-        let new = match panic::catch_unwind(AssertUnwindSafe(|| transform(&old))) {
+        let new = match panic::catch_unwind(AssertUnwindSafe(|| transform(track_id, &old))) {
             Ok(Ok(new)) => new,
             Ok(Err(reason)) => return self.fail(id, reason),
             Err(_) => return self.fail(id, "internal error while writing tags".into()),
@@ -611,7 +611,7 @@ mod tests {
         fs::write(&path, b"header-old-audio").unwrap();
         let mut lib = library_with_track(&path);
         let (_, report) = lib
-            .rewrite_files("edit", vec![(1, path.clone())], |b| {
+            .rewrite_files("edit", vec![(1, path.clone())], |_, b| {
                 Ok(String::from_utf8_lossy(b)
                     .replace("old", "new!")
                     .into_bytes())
@@ -663,7 +663,7 @@ mod tests {
         fs::write(&path, b"data").unwrap();
         let mut lib = library_with_track(&path);
         let (_, report) = lib
-            .rewrite_files("edit", vec![(1, path.clone())], |_| Err("bad".into()))
+            .rewrite_files("edit", vec![(1, path.clone())], |_, _| Err("bad".into()))
             .unwrap();
         assert_eq!(report.failed, vec![(path.clone(), "bad".to_owned())]);
         assert_eq!(fs::read(&path).unwrap(), b"data");
@@ -678,7 +678,7 @@ mod tests {
         fs::write(&b, b"b").unwrap();
         let mut lib = library_with_track(&a);
         let (_, report) = lib
-            .rewrite_files("edit", vec![(1, a.clone()), (1, b.clone())], |bytes| {
+            .rewrite_files("edit", vec![(1, a.clone()), (1, b.clone())], |_, bytes| {
                 assert_ne!(bytes, b"a", "simulated library bug");
                 Ok(b"B".to_vec())
             })

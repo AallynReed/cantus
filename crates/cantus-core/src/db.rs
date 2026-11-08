@@ -10,10 +10,12 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/001_init.sql"),
     include_str!("../migrations/002_journal.sql"),
     include_str!("../migrations/003_moves_and_settings.sql"),
+    include_str!("../migrations/004_identify.sql"),
 ];
 
 pub(crate) const TRACK_COLUMNS: &str = "id, path, state, error, duration_ms, bitrate, sample_rate, \
-     channels, title, artist, album_artist, album, track_no, disc_no, year, genre";
+     channels, title, artist, album_artist, album, track_no, disc_no, year, genre, recording_mbid, \
+     release_mbid";
 
 /// The music library database.
 pub struct Library {
@@ -146,6 +148,8 @@ pub(crate) fn track_from_row(r: &Row) -> rusqlite::Result<Track> {
             disc_no: r.get(13)?,
             year: r.get(14)?,
             genre: r.get(15)?,
+            recording_mbid: r.get(16)?,
+            release_mbid: r.get(17)?,
         },
     })
 }

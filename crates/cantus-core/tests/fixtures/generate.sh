@@ -17,3 +17,4 @@ encode 22050 -c:a libmp3lame -b:a 32k tone.mp3
 encode 22050 -c:a libvorbis -q:a 0 tone.ogg
 encode 48000 -c:a libopus -b:a 16k tone.opus
 encode 22050 -c:a aac -b:a 32k tone.m4a
+ffmpeg -v error -y -f lavfi -i "sine=frequency=440:duration=4:sample_rate=11025" -ac 1 "${tags[@]}" -c:a flac long.flac

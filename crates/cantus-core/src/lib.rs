@@ -13,6 +13,7 @@ mod playlist;
 mod scan;
 mod tags;
 mod template;
+mod tools;
 mod torrent;
 
 use std::path::PathBuf;
@@ -29,6 +30,7 @@ pub use playlist::{Entry, ImportReport, PlaylistSummary};
 pub use scan::ScanReport;
 pub use tags::Metadata;
 pub use template::{DEFAULT_TEMPLATE, Template};
+pub use tools::{SyncPlan, download_audio, preview_sync, run_sync, tool_version};
 pub use torrent::{
     TorrentConfig, TorrentFile, TorrentId, TorrentSource, TorrentState, TorrentStatus, Torrents,
 };

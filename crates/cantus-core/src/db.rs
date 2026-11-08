@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension, Row};
 
-use crate::{Metadata, Result};
+use crate::{Error, Metadata, Result};
 
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/001_init.sql"),
@@ -86,6 +86,21 @@ impl Library {
         Ok(Self { conn })
     }
 
+    /// Writes a consistent copy of the database to `dest`, replacing any earlier copy.
+    pub fn snapshot(&self, dest: &Path) -> Result<()> {
+        if let Some(dir) = dest.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        let tmp = dest.with_extension("tmp");
+        let _ = fs::remove_file(&tmp);
+        let tmp_str = tmp
+            .to_str()
+            .ok_or_else(|| Error::NonUtf8Path(tmp.clone()))?;
+        self.conn.execute("VACUUM INTO ?1", [tmp_str])?;
+        fs::rename(&tmp, dest)?;
+        Ok(())
+    }
+
     pub fn roots(&self) -> Result<Vec<PathBuf>> {
         let mut stmt = self.conn.prepare("SELECT path FROM root ORDER BY path")?;
         let roots = stmt.query_map([], |r| r.get::<_, String>(0).map(PathBuf::from))?;
@@ -159,6 +174,21 @@ pub(crate) fn track_from_row(r: &Row) -> rusqlite::Result<Track> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_can_be_opened_and_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::open(&dir.path().join("library.db")).unwrap();
+        lib.set_setting("key", "first").unwrap();
+        let copy = dir.path().join("backups/copy.db");
+
+        lib.snapshot(&copy).unwrap();
+        lib.set_setting("key", "second").unwrap();
+        lib.snapshot(&copy).unwrap();
+
+        let restored = Library::open(&copy).unwrap();
+        assert_eq!(restored.setting("key").unwrap().as_deref(), Some("second"));
+    }
 
     #[test]
     fn migrations_run_once() {

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Cantus
+Comment=Identify, tag, organize and share your music
+Exec=cantus
+Icon=cantus
+Categories=AudioVideo;Audio;

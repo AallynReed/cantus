@@ -3,6 +3,7 @@ name: Release
 on:
   push:
     tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -29,14 +30,24 @@ jobs:
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
-      - name: Check tag matches crate version
-        run: test "${GITHUB_REF_NAME#v}" = "$(cargo pkgid -p cantus-app | sed 's/.*[#@]//')"
+      - name: Work out the version
+        run: |
+          crate="$(cargo pkgid -p cantus-app | sed 's/.*[#@]//')"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            test "${GITHUB_REF_NAME#v}" = "$crate"
+            echo "VERSION=$GITHUB_REF_NAME" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=v$crate-dev" >> "$GITHUB_ENV"
+          fi
+          echo "NUMBER=$crate" >> "$GITHUB_ENV"
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config libxkbcommon-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
       - run: cargo build --release --locked --target ${{ matrix.target }}
+        env:
+          CANTUS_ACOUSTID_KEY: ${{ secrets.ACOUSTID_KEY }}
       - name: Package
         run: |
-          name="cantus-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          name="cantus-${VERSION}-${{ matrix.target }}"
           mkdir "$name"
           cp LICENSE README.md "$name/"
           if [ "$RUNNER_OS" = Windows ]; then
@@ -47,13 +58,47 @@ jobs:
             tar czf "$name.tar.gz" "$name"
           fi
           rm -r "$name"
+      - name: Windows installer
+        if: runner.os == 'Windows'
+        run: |
+          choco install innosetup --no-progress -y
+          iscc "/DAppVersion=$NUMBER" "/DBinary=../../target/${{ matrix.target }}/release/cantus.exe" \
+            "/DOutputName=cantus-${VERSION}-${{ matrix.target }}-setup" packaging/windows/cantus.iss
+      - name: Linux AppImage
+        if: runner.os == 'Linux'
+        env:
+          APPIMAGETOOL_SHA256: ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
+        run: |
+          curl -fsSL -o appimagetool https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+          echo "$APPIMAGETOOL_SHA256  appimagetool" | sha256sum -c
+          chmod +x appimagetool
+          mkdir -p AppDir/usr/bin
+          cp "target/${{ matrix.target }}/release/cantus" AppDir/usr/bin/
+          cp packaging/linux/cantus.desktop AppDir/
+          cp packaging/icon.png AppDir/cantus.png
+          printf '#!/bin/sh\nexec "$(dirname "$(readlink -f "$0")")/usr/bin/cantus" "$@"\n' > AppDir/AppRun
+          chmod +x AppDir/AppRun
+          ARCH=x86_64 ./appimagetool --appimage-extract-and-run AppDir "cantus-${VERSION}-${{ matrix.target }}.AppImage"
+      - name: macOS app bundle
+        if: runner.os == 'macOS'
+        run: |
+          app=Cantus.app/Contents
+          mkdir -p "$app/MacOS"
+          cp "target/${{ matrix.target }}/release/cantus" "$app/MacOS/"
+          sed "s/VERSION/$NUMBER/g" packaging/macos/Info.plist > "$app/Info.plist"
+          ditto -c -k --keepParent Cantus.app "cantus-${VERSION}-${{ matrix.target }}.app.zip"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.target }}
-          path: cantus-*.*
+          path: |
+            cantus-*.zip
+            cantus-*.tar.gz
+            cantus-*.exe
+            cantus-*.AppImage
           if-no-files-found: error
 
   release:
+    if: github.ref_type == 'tag'
     needs: build
     runs-on: ubuntu-latest
     permissions:

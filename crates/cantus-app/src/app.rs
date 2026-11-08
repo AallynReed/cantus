@@ -1,20 +1,47 @@
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use cantus_core::{BatchReport, ChangeSetSummary, Library, ScanReport, Track};
+use cantus_core::{
+    BatchReport, ChangeSetSummary, DEFAULT_TEMPLATE, Library, PlannedMove, ScanReport, Template,
+    Track,
+};
 use eframe::egui;
 
 use crate::editor::Editor;
+use crate::organize::{self, Organize};
 use crate::table::{self, Selection, Sort, SortKey};
 
-/// Background work runs on its own thread and database connection; it reports a status line.
-type JobResult = Result<String, String>;
+const TEMPLATE_SETTING: &str = "template";
+
+/// Background work runs on its own thread and database connection.
+type JobResult = Result<JobOutput, String>;
+
+struct JobOutput {
+    status: String,
+    data: JobData,
+}
+
+enum JobData {
+    None,
+    Plan(Vec<PlannedMove>),
+}
+
+impl From<String> for JobOutput {
+    fn from(status: String) -> Self {
+        Self {
+            status,
+            data: JobData::None,
+        }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
     Library,
+    Organize,
     History,
 }
 
@@ -26,6 +53,7 @@ pub struct App {
     sort: Sort,
     selection: Selection,
     editor: Option<Editor>,
+    organize: Organize,
     view: View,
     job: Option<Receiver<JobResult>>,
     status: String,
@@ -38,6 +66,11 @@ impl App {
             Ok(n) => format!("Settled {n} changes interrupted by a crash; see History"),
             Err(err) => format!("Cannot check for interrupted changes: {err}"),
         };
+        let template = library
+            .setting(TEMPLATE_SETTING)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| DEFAULT_TEMPLATE.to_owned());
         let mut app = Self {
             db_path,
             library,
@@ -49,6 +82,7 @@ impl App {
             },
             selection: Selection::default(),
             editor: None,
+            organize: Organize::new(template),
             view: View::Library,
             job: None,
             status,
@@ -69,6 +103,7 @@ impl App {
                 self.sort.apply(&mut self.tracks);
                 self.selection.anchor = None;
                 self.editor = None;
+                self.organize.plan = None;
             }
             Err(err) => self.status = format!("Cannot load library: {err}"),
         }
@@ -78,7 +113,7 @@ impl App {
         &mut self,
         ctx: &egui::Context,
         label: &str,
-        work: impl FnOnce(&mut Library) -> cantus_core::Result<String> + Send + 'static,
+        work: impl FnOnce(&mut Library) -> cantus_core::Result<JobOutput> + Send + 'static,
     ) {
         let (tx, rx) = mpsc::channel();
         let db_path = self.db_path.clone();
@@ -104,13 +139,22 @@ impl App {
             Err(TryRecvError::Disconnected) => Err("Background task stopped unexpectedly".into()),
         };
         self.job = None;
-        self.status = result.unwrap_or_else(|err| err);
         self.reload();
+        match result {
+            Ok(output) => {
+                self.status = output.status;
+                match output.data {
+                    JobData::None => {}
+                    JobData::Plan(plan) => self.organize.plan = Some(plan),
+                }
+            }
+            Err(err) => self.status = err,
+        }
     }
 
     fn scan(&mut self, ctx: &egui::Context, root: Option<PathBuf>) {
         self.run_job(ctx, "Scanning", move |library| {
-            Ok(summary(&scan(library, root)?))
+            Ok(summary(&scan(library, root)?).into())
         });
     }
 
@@ -120,14 +164,66 @@ impl App {
         let changes = editor.changes();
         self.run_job(ctx, "Saving tags", move |library| {
             let (_, report) = library.edit_tags(&ids, &changes)?;
-            Ok(batch_summary("Saved", &report))
+            Ok(batch_summary("Saved", &report).into())
         });
     }
 
     fn undo(&mut self, ctx: &egui::Context, change_set: i64) {
         self.run_job(ctx, "Undoing", move |library| {
-            Ok(batch_summary("Restored", &library.undo(change_set)?))
+            Ok(batch_summary("Restored", &library.undo(change_set)?).into())
         });
+    }
+
+    fn preview_organize(&mut self, ctx: &egui::Context, template: Template) {
+        if let Err(err) = self
+            .library
+            .set_setting(TEMPLATE_SETTING, &self.organize.source)
+        {
+            self.status = format!("Cannot save the template: {err}");
+        }
+        let ids = self.scope_ids();
+        self.run_job(ctx, "Planning", move |library| {
+            let plan = library.plan_organize(&template, ids.as_ref())?;
+            Ok(JobOutput {
+                status: format!("{} files would move", plan.len()),
+                data: JobData::Plan(plan),
+            })
+        });
+    }
+
+    fn apply_organize(&mut self, ctx: &egui::Context, plan: Vec<PlannedMove>) {
+        self.run_job(ctx, "Moving files", move |library| {
+            let (_, report) = library.organize(plan)?;
+            Ok(batch_summary("Moved", &report).into())
+        });
+    }
+
+    /// The selected tracks, or `None` for the whole library.
+    fn scope_ids(&self) -> Option<BTreeSet<i64>> {
+        (!self.selection.ids.is_empty()).then(|| self.selection.ids.clone())
+    }
+
+    fn organize_view(&mut self, ui: &mut egui::Ui, busy: bool) {
+        let ids = self.scope_ids();
+        let in_scope: Vec<&Track> = self
+            .tracks
+            .iter()
+            .filter(|t| ids.as_ref().is_none_or(|ids| ids.contains(&t.id)))
+            .collect();
+        let scope = match in_scope.len() {
+            1 => "1 selected track".to_owned(),
+            n if ids.is_some() => format!("{n} selected tracks"),
+            _ => "all tracks".to_owned(),
+        };
+        let mut action = organize::Action::None;
+        egui::CentralPanel::default().show(ui, |ui| {
+            action = self.organize.show(ui, &in_scope, &scope, busy);
+        });
+        match action {
+            organize::Action::None => {}
+            organize::Action::Preview(template) => self.preview_organize(ui.ctx(), template),
+            organize::Action::Apply(plan) => self.apply_organize(ui.ctx(), plan),
+        }
     }
 
     fn library_view(&mut self, ui: &mut egui::Ui, busy: bool) {
@@ -256,6 +352,7 @@ impl eframe::App for App {
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.view, View::Library, "Library");
+                ui.selectable_value(&mut self.view, View::Organize, "Organize");
                 ui.selectable_value(&mut self.view, View::History, "History");
                 ui.separator();
                 let add = ui.add_enabled(!busy, egui::Button::new("Add folder…"));
@@ -281,6 +378,7 @@ impl eframe::App for App {
 
         match self.view {
             View::Library => self.library_view(ui, busy),
+            View::Organize => self.organize_view(ui, busy),
             View::History => self.history_view(ui, busy),
         }
     }
@@ -326,5 +424,10 @@ mod tests {
         harness.get_by_label("History").click();
         harness.run();
         harness.get_by_label("No changes yet");
+
+        harness.get_by_label("Organize").click();
+        harness.run();
+        harness.get_by_label("Organize 1 selected track");
+        harness.get_by_label("Preview moves");
     }
 }

@@ -2,6 +2,7 @@
 
 mod app;
 mod editor;
+mod organize;
 mod table;
 
 use std::path::PathBuf;

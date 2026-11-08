@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.1.0] - Unreleased
+## [0.1.0] - 2026-11-08
 
 - Scan folders into a library. Unchanged files are skipped and moved files keep their place in playlists.
 - Edit tags across many files at once. Every edit can be undone, and undo restores files byte for byte.

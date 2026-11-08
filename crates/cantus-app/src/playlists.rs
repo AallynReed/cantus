@@ -15,6 +15,8 @@ pub struct Playlists {
     selected: Option<i64>,
     entries: Vec<Entry>,
     new_name: String,
+    /// Playlist files offered for import where there's no file dialog.
+    files: Vec<PathBuf>,
 }
 
 enum Edit {
@@ -25,6 +27,7 @@ enum Edit {
 impl Playlists {
     pub fn refresh(&mut self, library: &Library) -> cantus_core::Result<()> {
         self.all = library.playlists()?;
+        self.files = platform::playlist_files();
         self.selected = self
             .selected
             .filter(|id| self.all.iter().any(|p| p.id == *id))
@@ -70,12 +73,21 @@ impl Playlists {
                     Err(err) => result = Some(err.to_string()),
                 }
             }
-            if ui.button("Import…").clicked()
+            if platform::DESKTOP
+                && ui.button("Import…").clicked()
                 && let Some(file) = platform::pick_playlist()
             {
                 result = self.import(library, file);
             }
         });
+        let found = std::mem::take(&mut self.files);
+        for file in &found {
+            let name = file.file_name().unwrap_or_default().to_string_lossy();
+            if ui.small_button(format!("Import {name}")).clicked() {
+                result = self.import(library, file.clone());
+            }
+        }
+        self.files = found;
         ui.separator();
 
         let mut clicked = None;
@@ -105,14 +117,16 @@ impl Playlists {
         let mut result = None;
         ui.horizontal(|ui| {
             let name = self.all.iter().find(|p| p.id == id).map(|p| p.name.clone());
-            ui.heading(name.unwrap_or_default());
-            if ui.button("Export…").clicked()
-                && let Some(file) = platform::save_playlist()
-            {
-                result = Some(match library.export_playlist(id, &file) {
-                    Ok(()) => format!("Exported to {}", file.display()),
-                    Err(err) => format!("Export failed: {err}"),
-                });
+            let name = name.unwrap_or_default();
+            ui.heading(&name);
+            if ui.button("Export…").clicked() {
+                for file in platform::save_playlist(&name) {
+                    result = Some(match library.export_playlist(id, &file) {
+                        Ok(()) => format!("Exported to {}", file.display()),
+                        Err(err) => format!("Export failed: {err}"),
+                    });
+                }
+                self.files = platform::playlist_files();
             }
             if ui.button("Delete").clicked() {
                 let message = library.delete_playlist(id).err().map(|e| e.to_string());

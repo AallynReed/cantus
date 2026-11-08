@@ -15,6 +15,8 @@ pub struct Import {
     pub batches: Vec<InboxBatch>,
     pub plan: Option<(i64, Vec<PlannedMove>)>,
     pub hardlink: bool,
+    /// `.torrent` files offered where there's no file dialog.
+    pub torrent_files: Vec<PathBuf>,
 }
 
 pub enum Action {
@@ -71,6 +73,18 @@ impl Import {
                 *action = Action::AddFile(file);
             }
         });
+        for file in &self.torrent_files {
+            let name = file.file_name().unwrap_or_default().to_string_lossy();
+            if ui
+                .add_enabled(
+                    torrents_on,
+                    egui::Button::new(format!("Add {name}")).small(),
+                )
+                .clicked()
+            {
+                *action = Action::AddFile(file.clone());
+            }
+        }
         ui.small(
             "Torrent peers can see your IP address; a proxy can be set in Settings. You are \
              responsible for what you download and for following each site's terms.",

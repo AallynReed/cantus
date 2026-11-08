@@ -27,6 +27,7 @@ use crate::table::{self, Selection, Sort, SortKey};
 const TEMPLATE_SETTING: &str = "template";
 const PREVIEW_SECONDS: u32 = 60;
 const TORRENT_POLL: Duration = Duration::from_secs(1);
+const ACCESS_CHECK: Duration = Duration::from_secs(2);
 const YT_DLP: &str = "yt-dlp";
 const RCLONE: &str = "rclone";
 const SNAPSHOT_NAME: &str = ".cantus-library.db";
@@ -91,6 +92,8 @@ pub struct App {
     last_torrent_poll: Option<Instant>,
     playlists: Playlists,
     torrents_started: bool,
+    file_access: bool,
+    last_access_check: Option<Instant>,
     delete_data: Arc<AtomicBool>,
     confirm_delete: bool,
     scroll_to: Option<usize>,
@@ -139,6 +142,8 @@ impl App {
             last_torrent_poll: None,
             playlists: Playlists::default(),
             torrents_started: false,
+            file_access: true,
+            last_access_check: None,
             delete_data,
             confirm_delete: false,
             scroll_to: None,
@@ -410,6 +415,7 @@ impl App {
             return;
         }
         self.last_torrent_poll = Some(Instant::now());
+        self.import.torrent_files = platform::torrent_files();
         self.import.statuses = torrents.list();
         self.import.files = self
             .import
@@ -847,6 +853,17 @@ fn ago(secs: i64) -> String {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
         platform::sync_keyboard(ui.ctx().egui_wants_keyboard_input());
+        if self
+            .last_access_check
+            .is_none_or(|at| at.elapsed() >= ACCESS_CHECK)
+        {
+            self.last_access_check = Some(Instant::now());
+            self.file_access = platform::has_file_access();
+        }
+        if !self.file_access {
+            // Nothing else repaints when the user returns from Android's settings.
+            ui.ctx().request_repaint_after(ACCESS_CHECK);
+        }
         self.poll_job();
         self.poll_preview();
         self.poll_torrents(ui.ctx());
@@ -873,6 +890,9 @@ impl eframe::App for App {
                 ui.selectable_value(&mut self.view, View::History, "History");
                 ui.selectable_value(&mut self.view, View::Settings, "Settings");
                 ui.separator();
+                if !self.file_access && ui.button("Allow file access").clicked() {
+                    platform::request_file_access();
+                }
                 let add = ui.add_enabled(!busy, egui::Button::new("Add folder…"));
                 if add.clicked()
                     && let Some(dir) = platform::pick_folder()

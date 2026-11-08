@@ -22,7 +22,7 @@ Web links need `yt-dlp` and `ffmpeg`, and sync needs `rclone`, installed on your
 
 ## Platforms
 
-Windows, Linux and macOS. An Android build runs from source: it covers everything except web import and sync, scans the shared Music folder, and needs "All files access" granted in Android settings. Playlists can't be imported or exported there yet.
+Windows, Linux and macOS. An Android build runs from source: it covers everything except web import and sync, and scans the shared Music folder after you allow file access. Playlists are shared through `Music/Playlists`, and `.torrent` files are picked up from `Download`.
 
 ## Build
 

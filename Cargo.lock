@@ -875,6 +875,7 @@ dependencies = [
  "eframe",
  "egui_extras",
  "egui_kittest",
+ "jni",
  "rfd",
  "rodio",
  "tempfile",

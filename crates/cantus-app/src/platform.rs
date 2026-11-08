@@ -33,12 +33,30 @@ mod imp {
             .pick_file()
     }
 
-    pub fn save_playlist() -> Option<PathBuf> {
+    /// Where to export a playlist: none if the user cancels.
+    pub fn save_playlist(_name: &str) -> Vec<PathBuf> {
         rfd::FileDialog::new()
             .add_filter("M3U8 playlist", &["m3u8"])
             .add_filter("Cantus playlist (keeps MusicBrainz ids)", &["json"])
             .save_file()
+            .into_iter()
+            .collect()
     }
+
+    /// Only Android lists files itself, having no file dialogs.
+    pub fn playlist_files() -> Vec<PathBuf> {
+        Vec::new()
+    }
+
+    pub fn torrent_files() -> Vec<PathBuf> {
+        Vec::new()
+    }
+
+    pub fn has_file_access() -> bool {
+        true
+    }
+
+    pub fn request_file_access() {}
 
     pub fn default_download_dir() -> PathBuf {
         directories::UserDirs::new()
@@ -52,15 +70,20 @@ mod imp {
 
 #[cfg(target_os = "android")]
 mod imp {
-    use std::path::PathBuf;
+    use std::fs;
+    use std::path::{Path, PathBuf};
     use std::sync::OnceLock;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     pub use android_activity::AndroidApp;
+    use jni::objects::{JObject, JValue};
+    use jni::{Env, JavaVM, jni_sig, jni_str};
 
     pub const DESKTOP: bool = false;
     const MUSIC_FOLDER: &str = "/storage/emulated/0/Music";
     const DOWNLOAD_FOLDER: &str = "/storage/emulated/0/Download/Cantus";
+    const DOWNLOADS: &str = "/storage/emulated/0/Download";
+    const PLAYLIST_FOLDER: &str = "/storage/emulated/0/Music/Playlists";
 
     static APP: OnceLock<AndroidApp> = OnceLock::new();
     static KEYBOARD_SHOWN: AtomicBool = AtomicBool::new(false);
@@ -86,8 +109,106 @@ mod imp {
         None
     }
 
-    pub fn save_playlist() -> Option<PathBuf> {
-        None
+    /// Both formats, so the playlist works in other apps and keeps its MusicBrainz ids.
+    pub fn save_playlist(name: &str) -> Vec<PathBuf> {
+        let stem: String = name
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || " -_".contains(c) {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let base = Path::new(PLAYLIST_FOLDER).join(stem);
+        let _ = fs::create_dir_all(PLAYLIST_FOLDER);
+        vec![base.with_extension("m3u8"), base.with_extension("json")]
+    }
+
+    pub fn playlist_files() -> Vec<PathBuf> {
+        files_in(PLAYLIST_FOLDER, &["m3u8", "m3u", "json"])
+    }
+
+    pub fn torrent_files() -> Vec<PathBuf> {
+        files_in(DOWNLOADS, &["torrent"])
+    }
+
+    fn files_in(folder: &str, extensions: &[&str]) -> Vec<PathBuf> {
+        let Ok(entries) = fs::read_dir(folder) else {
+            return Vec::new();
+        };
+        let mut files: Vec<PathBuf> = entries
+            .filter_map(|entry| Some(entry.ok()?.path()))
+            .filter(|path| {
+                path.extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| extensions.iter().any(|x| x.eq_ignore_ascii_case(e)))
+            })
+            .collect();
+        files.sort();
+        files
+    }
+
+    /// Runs `work` with a JNI environment and the current activity.
+    fn with_activity<T>(
+        work: impl FnOnce(&mut Env, &JObject) -> jni::errors::Result<T>,
+    ) -> Option<T> {
+        let app = APP.get()?;
+        #[allow(unsafe_code)] // The app hands out pointers valid for the life of the activity.
+        let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) };
+        vm.attach_current_thread_for_scope(|env| {
+            #[allow(unsafe_code)] // See above; this reference is only used inside this call.
+            let activity = unsafe { JObject::from_raw(env, app.activity_as_ptr().cast()) };
+            work(env, &activity)
+        })
+        .ok()
+    }
+
+    /// Scanning the shared Music folder needs Android's "All files access".
+    pub fn has_file_access() -> bool {
+        with_activity(|env, _| {
+            env.call_static_method(
+                jni_str!("android/os/Environment"),
+                jni_str!("isExternalStorageManager"),
+                jni_sig!("()Z"),
+                &[],
+            )?
+            .z()
+        })
+        .unwrap_or(false)
+    }
+
+    /// Opens Android's settings page for granting that access.
+    pub fn request_file_access() {
+        let opened = with_activity(|env, activity| {
+            let action =
+                env.new_string("android.settings.MANAGE_APP_ALL_FILES_ACCESS_PERMISSION")?;
+            let package = env.new_string("package:org.cantus.app")?;
+            let uri = env
+                .call_static_method(
+                    jni_str!("android/net/Uri"),
+                    jni_str!("parse"),
+                    jni_sig!("(Ljava/lang/String;)Landroid/net/Uri;"),
+                    &[JValue::Object(&package)],
+                )?
+                .l()?;
+            let intent = env.new_object(
+                jni_str!("android/content/Intent"),
+                jni_sig!("(Ljava/lang/String;Landroid/net/Uri;)V"),
+                &[JValue::Object(&action), JValue::Object(&uri)],
+            )?;
+            env.call_method(
+                activity,
+                jni_str!("startActivity"),
+                jni_sig!("(Landroid/content/Intent;)V"),
+                &[JValue::Object(&intent)],
+            )?;
+            Ok(())
+        });
+        if opened.is_none() {
+            show_error("Could not open Android's file access settings");
+        }
     }
 
     pub fn default_download_dir() -> PathBuf {

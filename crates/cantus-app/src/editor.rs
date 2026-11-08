@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use cantus_core::{Field, TagChange, Track};
+use cantus_core::{Field, PlaylistSummary, TagChange, Track};
 use eframe::egui::{self, Ui};
 
 /// Tag editor for the selected tracks. Only fields the user changes are written.
@@ -15,6 +15,7 @@ pub enum Action {
     Identify,
     Preview,
     Stop,
+    AddToPlaylist(i64),
 }
 
 struct FieldEdit {
@@ -69,7 +70,13 @@ impl Editor {
         self.fields.iter().filter_map(FieldEdit::change).collect()
     }
 
-    pub fn show(&mut self, ui: &mut Ui, busy: bool, playing: bool) -> Action {
+    pub fn show(
+        &mut self,
+        ui: &mut Ui,
+        busy: bool,
+        playing: bool,
+        playlists: &[PlaylistSummary],
+    ) -> Action {
         let n = self.ids.len();
         ui.heading(format!(
             "{n} track{} selected",
@@ -130,6 +137,22 @@ impl Editor {
                 };
             }
         });
+
+        if !playlists.is_empty() {
+            ui.add_space(8.0);
+            let label = ui.label("Add to playlist");
+            egui::ComboBox::from_id_salt("add_to_playlist")
+                .selected_text("Choose…")
+                .show_ui(ui, |ui| {
+                    for playlist in playlists {
+                        if ui.selectable_label(false, &playlist.name).clicked() {
+                            action = Action::AddToPlaylist(playlist.id);
+                        }
+                    }
+                })
+                .response
+                .labelled_by(label.id);
+        }
         action
     }
 }

@@ -4,6 +4,7 @@ mod app;
 mod editor;
 mod organize;
 mod player;
+mod playlists;
 mod review;
 mod settings;
 mod table;

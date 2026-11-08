@@ -15,6 +15,7 @@ use eframe::egui;
 use crate::editor::{self, Editor};
 use crate::organize::{self, Organize};
 use crate::player::Player;
+use crate::playlists::Playlists;
 use crate::review::{Accepted, Review};
 use crate::settings::{self, Settings};
 use crate::table::{self, Selection, Sort, SortKey};
@@ -50,6 +51,7 @@ enum View {
     Library,
     Organize,
     Identify,
+    Playlists,
     History,
     Settings,
 }
@@ -68,6 +70,7 @@ pub struct App {
     progress: Arc<Mutex<String>>,
     cancel: Arc<AtomicBool>,
     review: Option<Review>,
+    playlists: Playlists,
     settings: Settings,
     player: Player,
     decoding: Option<Receiver<Result<Pcm, String>>>,
@@ -104,6 +107,7 @@ impl App {
             progress: Arc::default(),
             cancel: Arc::default(),
             review: None,
+            playlists: Playlists::default(),
             settings,
             player: Player::default(),
             decoding: None,
@@ -126,6 +130,9 @@ impl App {
                 self.selection.anchor = None;
                 self.editor = None;
                 self.organize.plan = None;
+                if let Err(err) = self.playlists.refresh(&self.library) {
+                    self.status = format!("Cannot load playlists: {err}");
+                }
             }
             Err(err) => self.status = format!("Cannot load library: {err}"),
         }
@@ -316,6 +323,23 @@ impl App {
         }
     }
 
+    fn add_to_playlist(&mut self, id: i64) {
+        let ids: Vec<i64> = self.selection.ids.iter().copied().collect();
+        self.status = match self.library.add_to_playlist(id, &ids) {
+            Ok(()) => format!("Added {} to the playlist", ids.len()),
+            Err(err) => format!("Cannot add to the playlist: {err}"),
+        };
+        if let Err(err) = self.playlists.refresh(&self.library) {
+            self.status = format!("Cannot load playlists: {err}");
+        }
+    }
+
+    fn playlists_view(&mut self, ui: &mut egui::Ui) {
+        if let Some(message) = self.playlists.show(ui, &mut self.library) {
+            self.status = message;
+        }
+    }
+
     fn settings_view(&mut self, ui: &mut egui::Ui) {
         let library = &self.library;
         let settings = &mut self.settings;
@@ -386,7 +410,9 @@ impl App {
         let mut action = editor::Action::None;
         let playing = self.player.is_playing();
         if let Some(editor) = &mut self.editor {
-            egui::Panel::right("editor").show(ui, |ui| action = editor.show(ui, busy, playing));
+            let playlists = &self.playlists.all;
+            egui::Panel::right("editor")
+                .show(ui, |ui| action = editor.show(ui, busy, playing, playlists));
         }
         match action {
             editor::Action::None => {}
@@ -394,6 +420,7 @@ impl App {
             editor::Action::Identify => self.identify(ui.ctx()),
             editor::Action::Preview => self.start_preview(ui.ctx()),
             editor::Action::Stop => self.player.stop(),
+            editor::Action::AddToPlaylist(id) => self.add_to_playlist(id),
         }
 
         egui::CentralPanel::default().show(ui, |ui| {
@@ -516,6 +543,7 @@ impl eframe::App for App {
                 ui.selectable_value(&mut self.view, View::Library, "Library");
                 ui.selectable_value(&mut self.view, View::Organize, "Organize");
                 ui.selectable_value(&mut self.view, View::Identify, "Review");
+                ui.selectable_value(&mut self.view, View::Playlists, "Playlists");
                 ui.selectable_value(&mut self.view, View::History, "History");
                 ui.selectable_value(&mut self.view, View::Settings, "Settings");
                 ui.separator();
@@ -552,6 +580,7 @@ impl eframe::App for App {
             View::Library => self.library_view(ui, busy),
             View::Organize => self.organize_view(ui, busy),
             View::Identify => self.identify_view(ui, busy),
+            View::Playlists => self.playlists_view(ui),
             View::History => self.history_view(ui, busy),
             View::Settings => self.settings_view(ui),
         }
@@ -603,6 +632,11 @@ mod tests {
         harness.run();
         harness.get_by_label("Organize 1 selected track");
         harness.get_by_label("Preview moves");
+
+        harness.get_by_label("Playlists").click();
+        harness.run();
+        harness.get_by_label("No playlists yet");
+        harness.get_by_label("New playlist");
 
         harness.get_by_label("Settings").click();
         harness.run();

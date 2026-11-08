@@ -11,12 +11,14 @@ Status: early development, no release yet.
 - Identify tracks by audio fingerprint (AcoustID) or by their tags (MusicBrainz), and review every change before it is written
 - Organize files with an editable path template, previewed first; files are never overwritten
 - Playlists as `.m3u8` and JSON; JSON files keep MusicBrainz ids, so they work across different folder layouts
+- Torrent downloads with file selection; finished downloads wait in an Inbox and import without interrupting seeding
+- Import audio from web links with yt-dlp, and sync a folder to cloud storage with rclone after a dry run
 
 Tag writes and moves are journaled, so an interrupted change is settled on the next start and undo restores files byte for byte.
 
 Identify is off until enabled in Settings. Matching by audio needs a free [AcoustID](https://acoustid.org) API key; without one, Cantus searches by tags.
 
-Planned: torrent downloads that feed into identify and organize, sync through rclone, URL import through yt-dlp.
+Web links need `yt-dlp` and `ffmpeg`, and sync needs `rclone`, installed on your PATH. Torrents are off until enabled in Settings.
 
 ## Build
 

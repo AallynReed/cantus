@@ -45,9 +45,7 @@ jobs:
           targets: aarch64-linux-android
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo install cargo-ndk --version 4.1.2 --locked
-      - run: bash packaging/android/build-apk.sh cantus.apk
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
+      - run: ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME" bash packaging/android/build-apk.sh cantus.apk
 
   deny:
     runs-on: ubuntu-latest

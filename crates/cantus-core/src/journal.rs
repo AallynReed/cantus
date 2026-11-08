@@ -1,20 +1,21 @@
-//! Crash-safe, undoable file rewrites.
+//! Crash-safe, undoable file rewrites and moves.
 //!
-//! Every rewrite is journaled before the file is touched: `planned` -> `applying` -> `done`.
-//! The new bytes go to a synced temp file that is renamed over the original, so the file on
-//! disk is always either the old or the new version. `recover` settles rows a crash left
-//! mid-step by checking which version is on disk.
+//! Every change is journaled before the file is touched: `planned` -> `applying` -> `done`.
+//! New bytes go to a synced temp file that is renamed over the original, so the file on disk
+//! is always either the old or the new version. Moves never overwrite, and a move across
+//! volumes deletes the source only after verifying the copy. `recover` settles rows a crash
+//! left mid-step by checking what is on disk.
 
 use std::ffi::OsString;
-use std::fs::{self, File, Permissions};
+use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{self, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 
-use crate::{Error, Library, Result};
+use crate::{Error, Library, PlannedMove, Result};
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct BatchReport {
@@ -45,11 +46,7 @@ impl Library {
         files: Vec<(i64, PathBuf)>,
         mut transform: impl FnMut(&[u8]) -> Result<Vec<u8>, String>,
     ) -> Result<(i64, BatchReport)> {
-        self.conn.execute(
-            "INSERT INTO change_set (created_at, description) VALUES (?1, ?2)",
-            params![unix_now(), description],
-        )?;
-        let change_set = self.conn.last_insert_rowid();
+        let change_set = self.new_change_set(description)?;
         let mut report = BatchReport::default();
         for (track_id, path) in files {
             match self.rewrite_one(change_set, track_id, &path, &mut transform)? {
@@ -60,6 +57,68 @@ impl Library {
         Ok((change_set, report))
     }
 
+    /// Moves files as one undoable change set, then removes source folders left empty.
+    pub(crate) fn move_files(
+        &mut self,
+        description: &str,
+        moves: Vec<PlannedMove>,
+    ) -> Result<(i64, BatchReport)> {
+        let change_set = self.new_change_set(description)?;
+        let mut report = BatchReport::default();
+        for m in moves {
+            match self.move_one(change_set, &m)? {
+                Ok(()) => report.done += 1,
+                Err(reason) => report.failed.push((m.from, reason)),
+            }
+        }
+        Ok((change_set, report))
+    }
+
+    fn new_change_set(&self, description: &str) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO change_set (created_at, description) VALUES (?1, ?2)",
+            params![unix_now(), description],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    fn move_one(&self, change_set: i64, m: &PlannedMove) -> FileOutcome {
+        let from = utf8(&m.from)?;
+        let to = utf8(&m.to)?;
+        self.conn.execute(
+            "INSERT INTO journal (change_set_id, track_id, path, new_path, step, hash_before)
+             VALUES (?1, ?2, ?3, ?4, 'applying', x'')",
+            params![change_set, m.track_id, from, to],
+        )?;
+        let id = self.conn.last_insert_rowid();
+        if let Err(reason) = self.perform_move(id, &m.from, &m.to)? {
+            return self.fail(id, reason);
+        }
+        self.set_step(id, "done", None)?;
+        self.set_track_path(m.track_id, to)?;
+        prune_empty_dirs(&m.from, &m.root);
+        Ok(Ok(()))
+    }
+
+    /// Renames `from` to `to`, falling back to a verified copy across volumes.
+    fn perform_move(&self, id: i64, from: &Path, to: &Path) -> FileOutcome {
+        let moved = match rename_no_clobber(from, to) {
+            Err(err) if err.kind() == io::ErrorKind::CrossesDevices => match hash_file(from) {
+                Ok(digest) => {
+                    // Recorded first so recovery can tell a finished copy from a partial one.
+                    self.conn.execute(
+                        "UPDATE journal SET hash_before = ?1 WHERE id = ?2",
+                        params![digest, id],
+                    )?;
+                    copy_then_remove(from, to, &digest)
+                }
+                Err(err) => Err(err),
+            },
+            other => other,
+        };
+        Ok(moved.map_err(|err| err.to_string()))
+    }
+
     fn rewrite_one(
         &self,
         change_set: i64,
@@ -67,9 +126,7 @@ impl Library {
         path: &Path,
         transform: &mut impl FnMut(&[u8]) -> Result<Vec<u8>, String>,
     ) -> FileOutcome {
-        let path_str = path
-            .to_str()
-            .ok_or_else(|| Error::NonUtf8Path(path.into()))?;
+        let path_str = utf8(path)?;
         let old = match fs::read(path) {
             Ok(bytes) => bytes,
             Err(err) => return Ok(Err(err.to_string())),
@@ -114,7 +171,7 @@ impl Library {
         let rows = {
             let mut stmt = self.conn.prepare(
                 "SELECT id, track_id, path, hash_before, hash_after, prefix_len, suffix_len,
-                     old_middle
+                     old_middle, new_path
                  FROM journal WHERE change_set_id = ?1 AND step = 'done' ORDER BY id DESC",
             )?;
             stmt.query_map([change_set], |r| {
@@ -124,11 +181,15 @@ impl Library {
                     path: PathBuf::from(r.get::<_, String>(2)?),
                     hash_before: r.get(3)?,
                     hash_after: r.get(4)?,
-                    delta: Delta {
-                        prefix: r.get::<_, i64>(5)? as usize,
-                        suffix: r.get::<_, i64>(6)? as usize,
-                        old_middle: r.get(7)?,
+                    delta: match (r.get::<_, Option<i64>>(5)?, r.get::<_, Option<i64>>(6)?) {
+                        (Some(prefix), Some(suffix)) => Some(Delta {
+                            prefix: prefix as usize,
+                            suffix: suffix as usize,
+                            old_middle: r.get(7)?,
+                        }),
+                        _ => None,
                     },
+                    new_path: r.get::<_, Option<String>>(8)?.map(PathBuf::from),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?
@@ -136,7 +197,11 @@ impl Library {
 
         let mut report = BatchReport::default();
         for row in rows {
-            match self.undo_one(&row)? {
+            let outcome = match &row.new_path {
+                Some(new_path) => self.undo_move(&row, new_path)?,
+                None => self.undo_rewrite(&row)?,
+            };
+            match outcome {
                 Ok(()) => report.done += 1,
                 Err(reason) => report.failed.push((row.path, reason)),
             }
@@ -144,32 +209,82 @@ impl Library {
         Ok(report)
     }
 
-    fn undo_one(&self, row: &DoneRow) -> FileOutcome {
-        let current = match fs::read(&row.path) {
+    fn undo_rewrite(&self, row: &DoneRow) -> FileOutcome {
+        // The track may have been organized elsewhere since this edit.
+        let path = self.current_path(row)?;
+        let current = match fs::read(&path) {
             Ok(bytes) => bytes,
             Err(err) => return Ok(Err(err.to_string())),
         };
-        if hash(&current) != row.hash_after {
+        if row.hash_after.as_deref() != Some(hash(&current).as_slice()) {
             return Ok(Err("file changed since the edit, left as is".into()));
         }
         let Some(old) = row
             .delta
-            .rebuild(&current)
+            .as_ref()
+            .and_then(|delta| delta.rebuild(&current))
             .filter(|old| hash(old) == row.hash_before)
         else {
             return Ok(Err("journal does not match the file, left as is".into()));
         };
 
         self.set_step(row.id, "undoing", None)?;
-        if let Err(err) = replace_file(&row.path, &old) {
+        if let Err(err) = replace_file(&path, &old) {
             self.set_step(row.id, "done", Some(&err.to_string()))?;
             return Ok(Err(err.to_string()));
         }
         self.set_step(row.id, "undone", None)?;
         if let Some(track_id) = row.track_id {
-            self.refresh_track(track_id, &row.path)?;
+            self.refresh_track(track_id, &path)?;
         }
         Ok(Ok(()))
+    }
+
+    fn undo_move(&self, row: &DoneRow, new_path: &Path) -> FileOutcome {
+        self.set_step(row.id, "undoing", None)?;
+        if let Err(reason) = self.perform_move(row.id, new_path, &row.path)? {
+            self.set_step(row.id, "done", Some(&reason))?;
+            return Ok(Err(reason));
+        }
+        self.set_step(row.id, "undone", None)?;
+        if let Some(track_id) = row.track_id {
+            self.set_track_path(track_id, utf8(&row.path)?)?;
+            if let Some(root) = self.track_root(track_id)? {
+                prune_empty_dirs(new_path, &root);
+            }
+        }
+        Ok(Ok(()))
+    }
+
+    fn current_path(&self, row: &DoneRow) -> Result<PathBuf> {
+        let tracked = row.track_id.map_or(Ok(None), |id| {
+            self.conn
+                .query_row("SELECT path FROM track WHERE id = ?1", [id], |r| {
+                    r.get::<_, String>(0)
+                })
+                .optional()
+        })?;
+        Ok(tracked.map_or_else(|| row.path.clone(), PathBuf::from))
+    }
+
+    fn track_root(&self, track_id: i64) -> Result<Option<PathBuf>> {
+        let root = self
+            .conn
+            .query_row(
+                "SELECT r.path FROM root r JOIN track t ON t.root_id = r.id WHERE t.id = ?1",
+                [track_id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(root.map(PathBuf::from))
+    }
+
+    fn set_track_path(&self, track_id: i64, path: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE track SET path = ?1 WHERE id = ?2",
+            params![path, track_id],
+        )?;
+        Ok(())
     }
 
     /// Settles journal rows a crash left mid-step. Safe to run any number of times.
@@ -177,7 +292,7 @@ impl Library {
     pub fn recover(&mut self) -> Result<usize> {
         let rows = {
             let mut stmt = self.conn.prepare(
-                "SELECT id, track_id, path, step, hash_before, hash_after FROM journal
+                "SELECT id, track_id, path, step, hash_before, hash_after, new_path FROM journal
                  WHERE step IN ('planned', 'applying', 'undoing')",
             )?;
             stmt.query_map([], |r| {
@@ -188,12 +303,17 @@ impl Library {
                     r.get::<_, String>(3)?,
                     r.get::<_, Vec<u8>>(4)?,
                     r.get::<_, Option<Vec<u8>>>(5)?,
+                    r.get::<_, Option<String>>(6)?.map(PathBuf::from),
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?
         };
 
-        for (id, track_id, path, step, before, after) in &rows {
+        for (id, track_id, path, step, before, after, new_path) in &rows {
+            if let Some(new_path) = new_path {
+                self.settle_move(*id, *track_id, path, new_path, step, before)?;
+                continue;
+            }
             // A leftover temp file is never the only copy: the original is replaced by rename.
             let _ = fs::remove_file(temp_path(path));
             let on_disk = fs::read(path).ok().map(|bytes| hash(&bytes));
@@ -212,6 +332,41 @@ impl Library {
             }
         }
         Ok(rows.len())
+    }
+
+    fn settle_move(
+        &self,
+        id: i64,
+        track_id: Option<i64>,
+        old: &Path,
+        new: &Path,
+        step: &str,
+        digest: &[u8],
+    ) -> Result<()> {
+        let applying = step == "applying";
+        let (from, to) = if applying { (old, new) } else { (new, old) };
+        let _ = fs::remove_file(temp_path(to));
+        let finished = match (from.exists(), to.exists()) {
+            (false, true) => true,
+            // Both exist only between a verified copy and deleting the source.
+            (true, true) => {
+                !digest.is_empty()
+                    && hash_file(to).is_ok_and(|h| h == digest)
+                    && fs::remove_file(from).is_ok()
+            }
+            _ => false,
+        };
+        let (new_step, error, path) = match (applying, finished) {
+            (true, true) => ("done", None, new),
+            (true, false) => ("failed", Some("interrupted, file not moved"), old),
+            (false, true) => ("undone", None, old),
+            (false, false) => ("done", Some("undo interrupted, file not moved"), new),
+        };
+        self.set_step(id, new_step, error)?;
+        if let Some(track_id) = track_id {
+            self.set_track_path(track_id, utf8(path)?)?;
+        }
+        Ok(())
     }
 
     /// Change sets, newest first.
@@ -256,8 +411,9 @@ struct DoneRow {
     track_id: Option<i64>,
     path: PathBuf,
     hash_before: Vec<u8>,
-    hash_after: Vec<u8>,
-    delta: Delta,
+    hash_after: Option<Vec<u8>>,
+    delta: Option<Delta>,
+    new_path: Option<PathBuf>,
 }
 
 /// The bytes of the old file that differ from the new one, enough to rebuild the old file.
@@ -297,6 +453,17 @@ fn hash(bytes: &[u8]) -> Vec<u8> {
     blake3::hash(bytes).as_bytes().to_vec()
 }
 
+fn hash_file(path: &Path) -> io::Result<Vec<u8>> {
+    let mut hasher = blake3::Hasher::new();
+    io::copy(&mut File::open(path)?, &mut hasher)?;
+    Ok(hasher.finalize().as_bytes().to_vec())
+}
+
+fn utf8(path: &Path) -> Result<&str> {
+    path.to_str()
+        .ok_or_else(|| Error::NonUtf8Path(path.to_path_buf()))
+}
+
 fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -321,6 +488,61 @@ fn replace_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
         let _ = fs::remove_file(&tmp);
     }
     result
+}
+
+/// Renames without replacing anything, except `from` itself (a case-only rename).
+fn rename_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
+    if to.exists() && !same_file::is_same_file(from, to)? {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "destination already exists",
+        ));
+    }
+    if let Some(dir) = to.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    fs::rename(from, to)?;
+    sync_parent(to)
+}
+
+/// Copies to a temp file, verifies it against `digest`, renames it into place, then deletes
+/// the source. The source is untouched unless the copy is complete and correct.
+fn copy_then_remove(from: &Path, to: &Path, digest: &[u8]) -> io::Result<()> {
+    let tmp = temp_path(to);
+    let copied = fs::copy(from, &tmp)
+        // Windows can only flush a handle opened for writing.
+        .and_then(|_| OpenOptions::new().write(true).open(&tmp)?.sync_all())
+        .and_then(|()| hash_file(&tmp))
+        .and_then(|actual| {
+            if actual == digest {
+                Ok(())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "copy does not match the source",
+                ))
+            }
+        })
+        .and_then(|()| fs::rename(&tmp, to))
+        .and_then(|()| sync_parent(to));
+    if copied.is_err() {
+        let _ = fs::remove_file(&tmp);
+        return copied;
+    }
+    fs::remove_file(from)
+}
+
+/// Removes `file`'s parent folders up to `root`, stopping at the first that is not empty.
+fn prune_empty_dirs(file: &Path, root: &Path) {
+    for dir in file
+        .ancestors()
+        .skip(1)
+        .take_while(|d| *d != root && d.starts_with(root))
+    {
+        if fs::remove_dir(dir).is_err() {
+            break;
+        }
+    }
 }
 
 fn write_synced(path: &Path, bytes: &[u8], permissions: Permissions) -> io::Result<()> {
@@ -500,6 +722,106 @@ mod tests {
             assert!(!temp_path(&path).exists());
             assert_eq!(lib.recover().unwrap(), 0, "second run is a no-op");
         }
+    }
+
+    /// A library with one file moved from `a.bin` to `sub/b.bin`.
+    fn moved() -> (tempfile::TempDir, Library, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("a.bin");
+        let to = dir.path().join("sub/b.bin");
+        fs::write(&from, b"audio").unwrap();
+        let mut lib = library_with_track(&from);
+        let m = PlannedMove {
+            track_id: 1,
+            root: dir.path().to_path_buf(),
+            from: from.clone(),
+            to: to.clone(),
+            collision: false,
+        };
+        assert_eq!(lib.move_files("move", vec![m]).unwrap().1.done, 1);
+        (dir, lib, from, to)
+    }
+
+    #[test]
+    fn verified_copy_removes_the_source_only_when_it_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let (from, to) = (dir.path().join("a"), dir.path().join("b"));
+        fs::write(&from, b"audio").unwrap();
+
+        assert!(copy_then_remove(&from, &to, &hash(b"something else")).is_err());
+        assert_eq!(fs::read(&from).unwrap(), b"audio");
+        assert!(!to.exists() && !temp_path(&to).exists());
+
+        copy_then_remove(&from, &to, &hash(b"audio")).unwrap();
+        assert_eq!(fs::read(&to).unwrap(), b"audio");
+        assert!(!from.exists());
+    }
+
+    #[test]
+    fn rename_never_replaces_another_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (from, to) = (dir.path().join("a"), dir.path().join("b"));
+        fs::write(&from, b"mine").unwrap();
+        fs::write(&to, b"theirs").unwrap();
+        assert!(rename_no_clobber(&from, &to).is_err());
+        assert_eq!(fs::read(&to).unwrap(), b"theirs");
+        assert_eq!(fs::read(&from).unwrap(), b"mine");
+    }
+
+    #[test]
+    fn recovery_settles_every_interrupted_move() {
+        // (source exists, destination holds, digest matches, step, expected, track ends at new)
+        let good = hash(b"audio");
+        type Case<'a> = (bool, Option<&'a [u8]>, &'a [u8], &'a str, &'a str, bool);
+        let cases: [Case; 7] = [
+            (true, None, b"", "applying", "failed", false),
+            (false, Some(b"audio"), b"", "applying", "done", true),
+            (true, Some(b"audio"), &good, "applying", "done", true),
+            (true, Some(b"junk"), &good, "applying", "failed", false),
+            (false, None, b"", "applying", "failed", false),
+            (false, Some(b"audio"), b"", "undoing", "done", true),
+            (true, None, b"", "undoing", "undone", false),
+        ];
+        for (old_exists, new_holds, digest, interrupted, expected, at_new) in cases {
+            let (_dir, mut lib, old, new) = moved();
+            fs::remove_file(&new).unwrap();
+            if old_exists {
+                fs::write(&old, b"audio").unwrap();
+            }
+            if let Some(bytes) = new_holds {
+                fs::write(&new, bytes).unwrap();
+            }
+            // Undoing moves new -> old, so a "digest match" only applies to applying here.
+            lib.conn
+                .execute(
+                    "UPDATE journal SET step = ?1, hash_before = ?2",
+                    params![interrupted, digest],
+                )
+                .unwrap();
+
+            assert_eq!(lib.recover().unwrap(), 1);
+            let label = format!("{old_exists} {new_holds:?} {interrupted}");
+            assert_eq!(step(&lib).0, expected, "{label}");
+            let tracked = lib.tracks().unwrap()[0].path.clone();
+            assert_eq!(
+                tracked,
+                if at_new { new.clone() } else { old.clone() },
+                "{label}"
+            );
+            assert_eq!(lib.recover().unwrap(), 0, "{label}");
+        }
+    }
+
+    #[test]
+    fn undoing_a_move_restores_the_path_and_removes_new_folders() {
+        let (dir, mut lib, from, to) = moved();
+        lib.conn
+            .execute("UPDATE root SET path = ?1", [dir.path().to_str().unwrap()])
+            .unwrap();
+        assert_eq!(lib.undo(1).unwrap().done, 1);
+        assert_eq!(fs::read(&from).unwrap(), b"audio");
+        assert!(!to.parent().unwrap().exists());
+        assert_eq!(lib.tracks().unwrap()[0].path, from);
     }
 
     #[test]

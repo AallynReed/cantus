@@ -642,6 +642,7 @@ dependencies = [
  "lofty",
  "proptest",
  "rusqlite",
+ "same-file",
  "tempfile",
  "thiserror 2.0.21",
  "walkdir",

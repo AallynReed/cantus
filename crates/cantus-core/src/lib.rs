@@ -3,16 +3,21 @@
 mod db;
 mod edit;
 mod journal;
+mod organize;
+mod paths;
 mod scan;
 mod tags;
+mod template;
 
 use std::path::PathBuf;
 
 pub use db::{Library, Track, TrackState};
 pub use edit::{Field, TagChange};
 pub use journal::{BatchReport, ChangeSetSummary};
+pub use organize::PlannedMove;
 pub use scan::ScanReport;
 pub use tags::Metadata;
+pub use template::{DEFAULT_TEMPLATE, Template};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

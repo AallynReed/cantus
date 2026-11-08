@@ -9,9 +9,10 @@ use crate::{Metadata, Result};
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/001_init.sql"),
     include_str!("../migrations/002_journal.sql"),
+    include_str!("../migrations/003_moves_and_settings.sql"),
 ];
 
-const TRACK_COLUMNS: &str = "id, path, state, error, duration_ms, bitrate, sample_rate, \
+pub(crate) const TRACK_COLUMNS: &str = "id, path, state, error, duration_ms, bitrate, sample_rate, \
      channels, title, artist, album_artist, album, track_no, disc_no, year, genre";
 
 /// The music library database.
@@ -99,6 +100,24 @@ impl Library {
         Ok(paths)
     }
 
+    pub fn setting(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM setting WHERE key = ?1", [key], |r| {
+                r.get(0)
+            })
+            .optional()?)
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO setting (key, value) VALUES (?1, ?2)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            [key, value],
+        )?;
+        Ok(())
+    }
+
     pub fn tracks(&self) -> Result<Vec<Track>> {
         let mut stmt = self
             .conn
@@ -108,7 +127,7 @@ impl Library {
     }
 }
 
-fn track_from_row(r: &Row) -> rusqlite::Result<Track> {
+pub(crate) fn track_from_row(r: &Row) -> rusqlite::Result<Track> {
     Ok(Track {
         id: r.get(0)?,
         path: PathBuf::from(r.get::<_, String>(1)?),

@@ -477,11 +477,24 @@ fn temp_path(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
-/// Writes `bytes` to a synced temp file beside `path`, then renames it over `path`.
+/// Rewrites an existing file atomically, keeping its permissions.
 fn replace_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    swap_in(path, bytes, Some(fs::metadata(path)?.permissions()))
+}
+
+/// Creates or replaces a file atomically.
+pub(crate) fn write_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    swap_in(
+        path,
+        bytes,
+        fs::metadata(path).ok().map(|m| m.permissions()),
+    )
+}
+
+/// Writes `bytes` to a synced temp file beside `path`, then renames it over `path`.
+fn swap_in(path: &Path, bytes: &[u8], permissions: Option<Permissions>) -> io::Result<()> {
     let tmp = temp_path(path);
-    let result = fs::metadata(path)
-        .and_then(|meta| write_synced(&tmp, bytes, meta.permissions()))
+    let result = write_synced(&tmp, bytes, permissions)
         .and_then(|()| fs::rename(&tmp, path))
         .and_then(|()| sync_parent(path));
     if result.is_err() {
@@ -545,11 +558,11 @@ fn prune_empty_dirs(file: &Path, root: &Path) {
     }
 }
 
-fn write_synced(path: &Path, bytes: &[u8], permissions: Permissions) -> io::Result<()> {
+fn write_synced(path: &Path, bytes: &[u8], permissions: Option<Permissions>) -> io::Result<()> {
     let mut file = File::create(path)?;
     file.write_all(bytes)?;
     file.sync_all()?;
-    file.set_permissions(permissions)
+    permissions.map_or(Ok(()), |p| file.set_permissions(p))
 }
 
 /// Makes the rename itself durable. Windows has no directory handles to sync.

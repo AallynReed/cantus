@@ -60,8 +60,10 @@ jobs:
           rm -r "$name"
       - name: Windows installer
         if: runner.os == 'Windows'
+        env:
+          # Keeps Git Bash from rewriting iscc's /D options as paths.
+          MSYS_NO_PATHCONV: 1
         run: |
-          choco install innosetup --no-progress -y
           iscc "/DAppVersion=$NUMBER" "/DBinary=../../target/${{ matrix.target }}/release/cantus.exe" \
             "/DOutputName=cantus-${VERSION}-${{ matrix.target }}-setup" packaging/windows/cantus.iss
       - name: Linux AppImage

@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use cantus_core::{Library, TorrentConfig, tool_version};
 use eframe::egui::{self, Ui};
 
+use crate::platform;
+
 const ONLINE_LOOKUPS: &str = "online_lookups";
 const ACOUSTID_KEY: &str = "acoustid_key";
 const TORRENTS: &str = "torrents";
@@ -45,7 +47,8 @@ impl Settings {
             online_lookups: read(ONLINE_LOOKUPS).as_deref() == Some("on"),
             acoustid_key: read(ACOUSTID_KEY).unwrap_or_default(),
             torrents: read(TORRENTS).as_deref() == Some("on"),
-            download_dir: read(DOWNLOAD_DIR).map_or_else(default_download_dir, PathBuf::from),
+            download_dir: read(DOWNLOAD_DIR)
+                .map_or_else(platform::default_download_dir, PathBuf::from),
             proxy: read(PROXY).unwrap_or_default(),
             down_limit_kib: read(DOWN_LIMIT).and_then(|v| v.parse().ok()).unwrap_or(0),
             up_limit_kib: read(UP_LIMIT).and_then(|v| v.parse().ok()).unwrap_or(0),
@@ -113,7 +116,7 @@ impl Settings {
         ui.horizontal(|ui| {
             ui.label(format!("Download folder: {}", self.download_dir.display()));
             if ui.small_button("Change…").clicked()
-                && let Some(dir) = rfd::FileDialog::new().pick_folder()
+                && let Some(dir) = platform::pick_folder().filter(|_| platform::DESKTOP)
             {
                 result = library.set_setting(DOWNLOAD_DIR, &dir.to_string_lossy());
                 self.download_dir = dir;
@@ -181,13 +184,6 @@ impl Settings {
             Err(err) => Change::Failed(format!("Cannot save settings: {err}")),
         }
     }
-}
-
-fn default_download_dir() -> PathBuf {
-    directories::UserDirs::new()
-        .and_then(|dirs| dirs.download_dir().map(Path::to_path_buf))
-        .unwrap_or_else(std::env::temp_dir)
-        .join("Cantus")
 }
 
 /// The key to use for lookups: the user's, or the one built in.

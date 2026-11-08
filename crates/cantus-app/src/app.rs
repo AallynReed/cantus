@@ -16,6 +16,7 @@ use eframe::egui;
 use crate::editor::{self, Editor};
 use crate::import::{self, Import};
 use crate::organize::{self, Organize};
+use crate::platform;
 use crate::player::Player;
 use crate::playlists::Playlists;
 use crate::review::{Accepted, Review};
@@ -845,6 +846,7 @@ fn ago(secs: i64) -> String {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
+        platform::sync_keyboard(ui.ctx().egui_wants_keyboard_input());
         self.poll_job();
         self.poll_preview();
         self.poll_torrents(ui.ctx());
@@ -859,19 +861,21 @@ impl eframe::App for App {
         let busy = self.job.is_some();
 
         egui::Panel::top("toolbar").show(ui, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.selectable_value(&mut self.view, View::Library, "Library");
                 ui.selectable_value(&mut self.view, View::Organize, "Organize");
                 ui.selectable_value(&mut self.view, View::Identify, "Review");
                 ui.selectable_value(&mut self.view, View::Import, "Import");
                 ui.selectable_value(&mut self.view, View::Playlists, "Playlists");
-                ui.selectable_value(&mut self.view, View::Sync, "Sync");
+                if platform::DESKTOP {
+                    ui.selectable_value(&mut self.view, View::Sync, "Sync");
+                }
                 ui.selectable_value(&mut self.view, View::History, "History");
                 ui.selectable_value(&mut self.view, View::Settings, "Settings");
                 ui.separator();
                 let add = ui.add_enabled(!busy, egui::Button::new("Add folder…"));
                 if add.clicked()
-                    && let Some(dir) = rfd::FileDialog::new().pick_folder()
+                    && let Some(dir) = platform::pick_folder()
                 {
                     self.scan(ui.ctx(), Some(dir));
                 }
@@ -929,8 +933,7 @@ mod tests {
     #[test]
     fn background_scan_results_show_after_reload() {
         let dir = tempfile::tempdir().unwrap();
-        let fixture =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../cantus-core/tests/fixtures/tone.flac");
+        let fixture = cantus_core::test_fixtures().join("tone.flac");
         std::fs::copy(fixture, dir.path().join("tone.flac")).unwrap();
         let db_path = dir.path().join("library.db");
 

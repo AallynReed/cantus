@@ -20,6 +20,10 @@ Identify is off until enabled in Settings. Matching by audio needs a free [Acous
 
 Web links need `yt-dlp` and `ffmpeg`, and sync needs `rclone`, installed on your PATH. Torrents are off until enabled in Settings.
 
+## Platforms
+
+Windows, Linux and macOS. An Android build runs from source: it covers everything except web import and sync, scans the shared Music folder, and needs "All files access" granted in Android settings. Playlists can't be imported or exported there yet.
+
 ## Build
 
 Requires stable Rust.
@@ -33,6 +37,8 @@ On Linux, install the audio and X11/Wayland development headers first, e.g. on D
 ```
 sudo apt install libasound2-dev pkg-config libxkbcommon-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
 ```
+
+For Android, install the NDK and `cargo-ndk`, then run `packaging/android/build-apk.sh cantus.apk`.
 
 ## License
 

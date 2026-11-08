@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use cantus_core::{Entry, Library, PlaylistSummary};
 use eframe::egui::{self, RichText, Ui};
 
+use crate::platform;
+
 const LIST_WIDTH: f32 = 220.0;
 const ROW_HEIGHT: f32 = 24.0;
 
@@ -69,7 +71,7 @@ impl Playlists {
                 }
             }
             if ui.button("Import…").clicked()
-                && let Some(file) = pick_import()
+                && let Some(file) = platform::pick_playlist()
             {
                 result = self.import(library, file);
             }
@@ -105,7 +107,7 @@ impl Playlists {
             let name = self.all.iter().find(|p| p.id == id).map(|p| p.name.clone());
             ui.heading(name.unwrap_or_default());
             if ui.button("Export…").clicked()
-                && let Some(file) = pick_export()
+                && let Some(file) = platform::save_playlist()
             {
                 result = Some(match library.export_playlist(id, &file) {
                     Ok(()) => format!("Exported to {}", file.display()),
@@ -198,17 +200,4 @@ fn entry_text(entry: &Entry) -> RichText {
     } else {
         RichText::new(format!("{text} (not in library)")).weak()
     }
-}
-
-fn pick_import() -> Option<PathBuf> {
-    rfd::FileDialog::new()
-        .add_filter("Playlists", &["m3u8", "m3u", "json"])
-        .pick_file()
-}
-
-fn pick_export() -> Option<PathBuf> {
-    rfd::FileDialog::new()
-        .add_filter("M3U8 playlist", &["m3u8"])
-        .add_filter("Cantus playlist (keeps MusicBrainz ids)", &["json"])
-        .save_file()
 }

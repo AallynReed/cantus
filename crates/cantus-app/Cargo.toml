@@ -7,6 +7,11 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[lib]
+name = "cantus_app"
+path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
+
 [[bin]]
 name = "cantus"
 path = "src/main.rs"
@@ -14,10 +19,22 @@ path = "src/main.rs"
 [dependencies]
 cantus-core = { path = "../cantus-core" }
 directories = "6.0.0"
-eframe = "0.37.0"
 egui_extras = "0.37.0"
-rfd = "0.17.2"
 rodio = { version = "0.23.0", default-features = false, features = ["playback"] }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+eframe = "0.37.0"
+rfd = "0.17.2"
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = "0.6.1"
+# Native activity rules out accesskit, which eframe enables by default.
+eframe = { version = "0.37.0", default-features = false, features = [
+    "android-native-activity",
+    "default_fonts",
+    "glow",
+    "system_fonts",
+] }
 
 [dev-dependencies]
 egui_kittest = { version = "0.37.0", features = ["eframe"] }

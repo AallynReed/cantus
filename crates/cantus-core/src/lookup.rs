@@ -76,7 +76,7 @@ pub struct Lookup {
 impl Lookup {
     pub fn new(endpoints: Endpoints, acoustid_key: Option<String>) -> Result<Self> {
         let https_only = endpoints.musicbrainz.starts_with("https:");
-        let http = Client::builder()
+        let http = with_trusted_roots(Client::builder())
             .user_agent(USER_AGENT)
             .timeout(Duration::from_secs(30))
             .https_only(https_only)
@@ -146,6 +146,24 @@ impl Lookup {
         .flatten()
         .filter(|bytes| Picture::from_reader(&mut bytes.as_slice()).is_ok())
     }
+}
+
+/// The default verifier needs Java support code on Android, so use Mozilla's root list there.
+#[cfg(target_os = "android")]
+fn with_trusted_roots(
+    builder: reqwest::blocking::ClientBuilder,
+) -> reqwest::blocking::ClientBuilder {
+    let roots = webpki_root_certs::TLS_SERVER_ROOT_CERTS
+        .iter()
+        .filter_map(|cert| reqwest::Certificate::from_der(cert).ok());
+    builder.tls_certs_only(roots)
+}
+
+#[cfg(not(target_os = "android"))]
+fn with_trusted_roots(
+    builder: reqwest::blocking::ClientBuilder,
+) -> reqwest::blocking::ClientBuilder {
+    builder
 }
 
 /// Sends with retries on network errors, 429 and 503. `Ok(None)` means 404.

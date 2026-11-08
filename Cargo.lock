@@ -869,6 +869,7 @@ dependencies = [
 name = "cantus-app"
 version = "0.1.0"
 dependencies = [
+ "android-activity",
  "cantus-core",
  "directories",
  "eframe",
@@ -899,6 +900,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "walkdir",
+ "webpki-root-certs",
 ]
 
 [[package]]
@@ -1393,6 +1395,7 @@ dependencies = [
  "egui-winit",
  "egui_glow",
  "egui_system_font_provider",
+ "glow",
  "glutin",
  "glutin-winit",
  "image",

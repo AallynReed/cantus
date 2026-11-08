@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use cantus_core::{InboxBatch, PlannedMove, TorrentFile, TorrentId, TorrentState, TorrentStatus};
 use eframe::egui::{self, Ui};
 
+use crate::platform;
+
 /// The Import tab: add links, watch downloads, and bring finished ones into the library.
 #[derive(Default)]
 pub struct Import {
@@ -64,9 +66,7 @@ impl Import {
             if ui
                 .add_enabled(torrents_on, egui::Button::new("Open .torrent…"))
                 .clicked()
-                && let Some(file) = rfd::FileDialog::new()
-                    .add_filter("Torrent", &["torrent"])
-                    .pick_file()
+                && let Some(file) = platform::pick_torrent()
             {
                 *action = Action::AddFile(file);
             }

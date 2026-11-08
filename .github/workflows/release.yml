@@ -32,7 +32,7 @@ jobs:
       - name: Check tag matches crate version
         run: test "${GITHUB_REF_NAME#v}" = "$(cargo pkgid -p cantus-app | sed 's/.*[#@]//')"
       - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config libxkbcommon-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
       - run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Package
         run: |

@@ -21,10 +21,10 @@ Requires stable Rust.
 cargo run --release
 ```
 
-On Linux, install the X11/Wayland development headers first, e.g. on Debian/Ubuntu:
+On Linux, install the audio and X11/Wayland development headers first, e.g. on Debian/Ubuntu:
 
 ```
-sudo apt install libxkbcommon-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+sudo apt install libasound2-dev pkg-config libxkbcommon-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
 ```
 
 ## License

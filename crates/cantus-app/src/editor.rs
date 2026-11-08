@@ -9,6 +9,14 @@ pub struct Editor {
     fields: Vec<FieldEdit>,
 }
 
+pub enum Action {
+    None,
+    Apply,
+    Identify,
+    Preview,
+    Stop,
+}
+
 struct FieldEdit {
     field: Field,
     /// The value shared by every selected track, or `None` when they differ.
@@ -61,8 +69,7 @@ impl Editor {
         self.fields.iter().filter_map(FieldEdit::change).collect()
     }
 
-    /// Returns true when the user clicks Apply with valid changes.
-    pub fn show(&mut self, ui: &mut Ui, busy: bool) -> bool {
+    pub fn show(&mut self, ui: &mut Ui, busy: bool, playing: bool) -> Action {
         let n = self.ids.len();
         ui.heading(format!(
             "{n} track{} selected",
@@ -100,8 +107,30 @@ impl Editor {
 
         ui.add_space(8.0);
         let changed = !self.changes().is_empty();
-        ui.add_enabled(!busy && changed && valid, egui::Button::new("Apply"))
-            .clicked()
+        let mut action = Action::None;
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(!busy && changed && valid, egui::Button::new("Apply"))
+                .clicked()
+            {
+                action = Action::Apply;
+            }
+            if ui
+                .add_enabled(!busy, egui::Button::new("Identify"))
+                .clicked()
+            {
+                action = Action::Identify;
+            }
+            let text = if playing { "Stop" } else { "Preview" };
+            if ui.add_enabled(n == 1, egui::Button::new(text)).clicked() {
+                action = if playing {
+                    Action::Stop
+                } else {
+                    Action::Preview
+                };
+            }
+        });
+        action
     }
 }
 

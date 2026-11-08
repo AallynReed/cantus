@@ -3,6 +3,9 @@
 mod app;
 mod editor;
 mod organize;
+mod player;
+mod review;
+mod settings;
 mod table;
 
 use std::path::PathBuf;

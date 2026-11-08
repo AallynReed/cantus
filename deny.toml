@@ -1,6 +1,8 @@
 [advisories]
 yanked = "deny"
 unmaintained = "workspace"
+# Needs an element whose Drop panics; librqbit-utp only stores u8.
+ignore = [{ id = "RUSTSEC-2026-0293", reason = "unreachable with u8 elements" }]
 
 [licenses]
 allow = [

@@ -34,6 +34,7 @@ pub struct Settings {
 pub enum Change {
     None,
     Torrents(bool),
+    DeleteAllData,
     Failed(String),
 }
 
@@ -165,6 +166,14 @@ impl Settings {
         }
         for line in self.tools.iter().flatten() {
             ui.label(line);
+        }
+        ui.add_space(16.0);
+
+        ui.heading("Your data");
+        ui.add_space(4.0);
+        ui.label("Everything Cantus stores about your library stays on this computer.");
+        if ui.button("Delete all Cantus data…").clicked() {
+            change = Change::DeleteAllData;
         }
 
         match result {

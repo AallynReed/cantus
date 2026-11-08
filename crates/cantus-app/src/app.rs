@@ -90,6 +90,9 @@ pub struct App {
     last_torrent_poll: Option<Instant>,
     playlists: Playlists,
     torrents_started: bool,
+    delete_data: Arc<AtomicBool>,
+    confirm_delete: bool,
+    scroll_to: Option<usize>,
     settings: Settings,
     player: Player,
     decoding: Option<Receiver<Result<Pcm, String>>>,
@@ -97,7 +100,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(db_path: PathBuf, mut library: Library) -> Self {
+    pub fn new(db_path: PathBuf, mut library: Library, delete_data: Arc<AtomicBool>) -> Self {
         let status = match library.recover() {
             Ok(0) => String::new(),
             Ok(n) => format!("Settled {n} changes interrupted by a crash; see History"),
@@ -135,6 +138,9 @@ impl App {
             last_torrent_poll: None,
             playlists: Playlists::default(),
             torrents_started: false,
+            delete_data,
+            confirm_delete: false,
+            scroll_to: None,
             settings,
             player: Player::default(),
             decoding: None,
@@ -154,7 +160,7 @@ impl App {
                 self.tracks = tracks;
                 self.history = history;
                 self.sort.apply(&mut self.tracks);
-                self.selection.anchor = None;
+                self.selection.forget_rows();
                 self.editor = None;
                 self.organize.plan = None;
                 if let Err(err) = self.playlists.refresh(&self.library) {
@@ -594,6 +600,7 @@ impl App {
         match change {
             settings::Change::None => {}
             settings::Change::Failed(error) => self.status = error,
+            settings::Change::DeleteAllData => self.confirm_delete = true,
             settings::Change::Torrents(true) => self.start_torrents(ui.ctx()),
             settings::Change::Torrents(false) => {
                 self.torrents = None;
@@ -654,7 +661,53 @@ impl App {
         }
     }
 
+    /// Up, Down, Ctrl+A and Esc, unless a text field has the keyboard.
+    fn handle_table_keys(&mut self, ctx: &egui::Context) {
+        if ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        let (delta, all, escape, modifiers) = ctx.input(|i| {
+            let delta = isize::from(i.key_pressed(egui::Key::ArrowDown))
+                - isize::from(i.key_pressed(egui::Key::ArrowUp));
+            (
+                delta,
+                i.modifiers.command && i.key_pressed(egui::Key::A),
+                i.key_pressed(egui::Key::Escape),
+                i.modifiers,
+            )
+        });
+        if delta != 0 {
+            self.scroll_to = self.selection.step(&self.tracks, delta, modifiers);
+        }
+        if all {
+            self.selection.select_all(&self.tracks);
+        }
+        if escape {
+            self.selection.clear();
+        }
+    }
+
+    fn confirm_delete_dialog(&mut self, ctx: &egui::Context) {
+        if !self.confirm_delete {
+            return;
+        }
+        egui::Modal::new(egui::Id::unique("confirm_delete")).show(ctx, |ui| {
+            ui.heading("Delete all Cantus data?");
+            ui.label("This removes the library database, history, playlists, settings and backups, then closes Cantus. Your music and downloads are not touched. It cannot be undone.");
+            ui.horizontal(|ui| {
+                if ui.button("Keep my data").clicked() {
+                    self.confirm_delete = false;
+                }
+                if ui.button("Delete and close").clicked() {
+                    self.delete_data.store(true, Ordering::Relaxed);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            });
+        });
+    }
+
     fn library_view(&mut self, ui: &mut egui::Ui, busy: bool) {
+        self.handle_table_keys(ui.ctx());
         if self.editor.as_ref().map(Editor::ids) != Some(&self.selection.ids) {
             self.editor = (!self.selection.ids.is_empty())
                 .then(|| Editor::new(&self.tracks, &self.selection.ids));
@@ -676,10 +729,13 @@ impl App {
         }
 
         egui::CentralPanel::default().show(ui, |ui| {
-            if let Some(key) = table::show(ui, &self.tracks, self.sort, &mut self.selection) {
+            let scroll_to = self.scroll_to.take();
+            if let Some(key) =
+                table::show(ui, &self.tracks, self.sort, &mut self.selection, scroll_to)
+            {
                 self.sort.toggle(key);
                 self.sort.apply(&mut self.tracks);
-                self.selection.anchor = None;
+                self.selection.forget_rows();
             }
         });
     }
@@ -852,6 +908,7 @@ impl eframe::App for App {
             View::History => self.history_view(ui, busy),
             View::Settings => self.settings_view(ui),
         }
+        self.confirm_delete_dialog(ui.ctx());
     }
 }
 
@@ -863,7 +920,7 @@ mod tests {
     #[test]
     fn starts_with_empty_library() {
         let library = Library::open_in_memory().unwrap();
-        let harness = Harness::new_eframe(|_| App::new(PathBuf::new(), library));
+        let harness = Harness::new_eframe(|_| App::new(PathBuf::new(), library, Arc::default()));
         harness.get_by_label("Add folder…");
         harness.get_by_label("Library empty");
         harness.get_by_label("0 tracks");
@@ -884,7 +941,8 @@ mod tests {
             "1 added, 0 updated, 0 moved, 0 missing, 0 unchanged"
         );
 
-        let mut harness = Harness::new_eframe(|_| App::new(db_path.clone(), library));
+        let mut harness =
+            Harness::new_eframe(|_| App::new(db_path.clone(), library, Arc::default()));
         harness.get_by_label("1 track");
 
         harness.get_by_label("Test Tone").click();
@@ -917,6 +975,10 @@ mod tests {
         harness.get_by_label("Settings").click();
         harness.run();
         harness.get_by_label("Allow online lookups");
+        harness.get_by_label("Delete all Cantus data…").click();
+        harness.run();
+        harness.get_by_label("Keep my data").click();
+        harness.run();
 
         harness.get_by_label("Library").click();
         harness.run();

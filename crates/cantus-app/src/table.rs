@@ -79,10 +79,36 @@ pub struct Selection {
     pub ids: BTreeSet<i64>,
     /// Row index Shift-click extends from. Cleared when the row order changes.
     pub anchor: Option<usize>,
+    /// Row the keyboard moves from.
+    pub cursor: Option<usize>,
 }
 
 impl Selection {
+    pub fn select_all(&mut self, tracks: &[Track]) {
+        self.ids = tracks.iter().map(|t| t.id).collect();
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    pub fn forget_rows(&mut self) {
+        self.anchor = None;
+        self.cursor = None;
+    }
+
+    /// Moves by `delta` rows, like clicking there. Returns the new row.
+    pub fn step(&mut self, tracks: &[Track], delta: isize, modifiers: Modifiers) -> Option<usize> {
+        let last = tracks.len().checked_sub(1)?;
+        let row = self
+            .cursor
+            .map_or(0, |cursor| cursor.saturating_add_signed(delta).min(last));
+        self.click(tracks, row, modifiers);
+        Some(row)
+    }
+
     pub fn click(&mut self, tracks: &[Track], index: usize, modifiers: Modifiers) {
+        self.cursor = Some(index);
         if !modifiers.command {
             self.ids.clear();
         }
@@ -108,6 +134,7 @@ pub fn show(
     tracks: &[Track],
     sort: Sort,
     selection: &mut Selection,
+    scroll_to: Option<usize>,
 ) -> Option<SortKey> {
     if tracks.is_empty() {
         ui.centered_and_justified(|ui| ui.label("Library empty"));
@@ -117,7 +144,11 @@ pub fn show(
     let modifiers = ui.input(|i| i.modifiers);
     let mut clicked = None;
     let mut clicked_row = None;
-    TableBuilder::new(ui)
+    let mut builder = TableBuilder::new(ui);
+    if let Some(row) = scroll_to {
+        builder = builder.scroll_to_row(row, None);
+    }
+    builder
         .striped(true)
         .resizable(true)
         .sense(egui::Sense::click())
@@ -273,6 +304,30 @@ mod tests {
     }
 
     #[test]
+    fn keyboard_steps_extend_and_stop_at_the_ends() {
+        let tracks: Vec<_> = (0..3).map(|i| track(i, "t", "a", 1)).collect();
+        let mut sel = Selection::default();
+        let ids = |s: &Selection| s.ids.iter().copied().collect::<Vec<_>>();
+
+        assert_eq!(
+            sel.step(&tracks, 1, Modifiers::NONE),
+            Some(0),
+            "first press lands on top"
+        );
+        assert_eq!(sel.step(&tracks, 1, Modifiers::SHIFT), Some(1));
+        assert_eq!(ids(&sel), [0, 1]);
+        sel.step(&tracks, 5, Modifiers::NONE);
+        assert_eq!(ids(&sel), [2]);
+        sel.step(&tracks, -9, Modifiers::NONE);
+        assert_eq!(ids(&sel), [0]);
+        sel.select_all(&tracks);
+        assert_eq!(ids(&sel), [0, 1, 2]);
+        sel.clear();
+        assert!(ids(&sel).is_empty());
+        assert_eq!(sel.step(&[], 1, Modifiers::NONE), None);
+    }
+
+    #[test]
     fn title_falls_back_to_file_name() {
         let mut t = track(1, "song", "", 1);
         t.meta.title = None;
@@ -287,13 +342,13 @@ mod tests {
         };
         let tracks = [track(1, "First Song", "Album", 1)];
         let harness = Harness::new_ui(|ui| {
-            show(ui, &tracks, sort, &mut Selection::default());
+            show(ui, &tracks, sort, &mut Selection::default(), None);
         });
         harness.get_by_label("First Song");
         harness.get_by_label("1:23");
 
         let harness = Harness::new_ui(|ui| {
-            show(ui, &[], sort, &mut Selection::default());
+            show(ui, &[], sort, &mut Selection::default(), None);
         });
         harness.get_by_label("Library empty");
     }

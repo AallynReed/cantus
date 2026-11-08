@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use cantus_core::{Library, ScanReport, Track, TrackState};
 use lofty::config::WriteOptions;
@@ -8,7 +8,7 @@ use lofty::prelude::*;
 const FORMATS: &[&str] = &["aiff", "flac", "m4a", "mp3", "ogg", "opus", "wav", "wv"];
 
 fn fixture(ext: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/tone.{ext}"))
+    cantus_core::test_fixtures().join(format!("tone.{ext}"))
 }
 
 /// A temp folder holding one copy of every fixture, plus a scanned library.

@@ -48,3 +48,12 @@ pub enum Error {
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+/// Test audio. `CANTUS_FIXTURES` overrides it where the source tree isn't present, on a phone.
+#[doc(hidden)]
+pub fn test_fixtures() -> PathBuf {
+    std::env::var_os("CANTUS_FIXTURES").map_or_else(
+        || PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures")),
+        PathBuf::from,
+    )
+}

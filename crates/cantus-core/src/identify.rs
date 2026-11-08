@@ -424,9 +424,7 @@ mod tests {
             "media": [{"position": 1, "track": [{"number": "4"}]}]}]}]}"#;
 
     fn fixture(name: &str) -> std::path::PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures")
-            .join(name)
+        crate::test_fixtures().join(name)
     }
 
     fn respond(request: &str) -> (u16, Vec<u8>) {

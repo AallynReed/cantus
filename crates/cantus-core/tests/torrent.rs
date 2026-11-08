@@ -89,7 +89,7 @@ fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
 fn downloaded(root: &Path) -> (Seeder, Torrents, Vec<PathBuf>) {
     let source = root.join("seed/album");
     fs::create_dir_all(&source).unwrap();
-    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let fixtures = cantus_core::test_fixtures();
     for name in AUDIO {
         fs::copy(fixtures.join(name), source.join(name)).unwrap();
     }
@@ -224,7 +224,7 @@ fn file_selection_limits_the_download_and_the_inbox() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("seed/album");
     fs::create_dir_all(&source).unwrap();
-    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let fixtures = cantus_core::test_fixtures();
     for name in AUDIO {
         fs::copy(fixtures.join(name), source.join(name)).unwrap();
     }

@@ -8,7 +8,7 @@ const FORMATS: &[&str] = &["aiff", "flac", "m4a", "mp3", "ogg", "opus", "wav", "
 /// `copies` copies of every fixture in a temp folder, scanned into a library.
 fn library(copies: usize) -> (tempfile::TempDir, Library) {
     let dir = tempfile::tempdir().unwrap();
-    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let fixtures = cantus_core::test_fixtures();
     for i in 0..copies {
         for ext in FORMATS {
             let dest = dir.path().join(format!("{i:03}.{ext}"));

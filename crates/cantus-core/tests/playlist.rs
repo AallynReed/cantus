@@ -6,7 +6,7 @@ use cantus_core::{Entry, Field, Library, TagChange, Template};
 const FORMATS: &[&str] = &["flac", "mp3", "ogg"];
 
 fn library_at(root: &Path, folder: &str) -> Library {
-    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let fixtures = cantus_core::test_fixtures();
     fs::create_dir_all(root.join(folder)).unwrap();
     for ext in FORMATS {
         let dest = root.join(folder).join(format!("tone.{ext}"));

@@ -8,7 +8,7 @@ const FORMATS: &[&str] = &["aiff", "flac", "m4a", "mp3", "ogg", "opus", "wav", "
 
 fn library(copies: usize, sub: &str) -> (tempfile::TempDir, Library) {
     let dir = tempfile::tempdir().unwrap();
-    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let fixtures = cantus_core::test_fixtures();
     fs::create_dir_all(dir.path().join(sub)).unwrap();
     for i in 0..copies {
         for ext in FORMATS {
@@ -172,7 +172,7 @@ fn hostile_tags_stay_inside_the_root() {
 #[test]
 fn case_only_rename_works() {
     let dir = tempfile::tempdir().unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tone.flac");
+    let fixture = cantus_core::test_fixtures().join("tone.flac");
     fs::copy(fixture, dir.path().join("test tone.flac")).unwrap();
     let mut lib = Library::open_in_memory().unwrap();
     lib.scan(dir.path()).unwrap();

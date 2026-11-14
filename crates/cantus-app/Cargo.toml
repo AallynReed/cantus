@@ -24,7 +24,7 @@ rodio = { version = "0.23.0", default-features = false, features = ["playback"] 
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 eframe = "0.37.0"
-rfd = "0.17.2"
+rfd = "0.18.0"
 
 [target.'cfg(target_os = "android")'.dependencies]
 android-activity = "0.6.1"
